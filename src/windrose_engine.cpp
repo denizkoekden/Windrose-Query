@@ -203,7 +203,7 @@ namespace UnrealEngine {
         size_t lastSlash = exeDir.find_last_of("\\/");
         if (lastSlash != std::string::npos) exeDir = exeDir.substr(0, lastSlash);
 
-        // Binaries\Win64 -> ..\..\ = R5\
+        /* Binaries\Win64 -> ..\..\ = R5\ */
         std::string jsonPath = exeDir + "\\..\\..\\ServerDescription.json";
 
         std::ifstream file(jsonPath);
