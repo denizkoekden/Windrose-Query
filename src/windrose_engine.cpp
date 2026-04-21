@@ -135,68 +135,137 @@ namespace UnrealEngine {
         return players;
     }
 
-    static std::string ReadServerInfoField(const std::string& key) {
+    // Reads the raw contents of <server>\R5\ServerDescription.json.
+    // Returns empty string if the file is missing.
+    static std::string ReadServerDescriptionRaw() {
         char exePath[MAX_PATH];
         GetModuleFileNameA(NULL, exePath, MAX_PATH);
         std::string exeDir(exePath);
         size_t lastSlash = exeDir.find_last_of("\\/");
-        exeDir = exeDir.substr(0, lastSlash);
+        if (lastSlash != std::string::npos) exeDir = exeDir.substr(0, lastSlash);
 
+        // Binaries\Win64 -> ..\..\ = R5\
         std::string jsonPath = exeDir + "\\..\\..\\ServerDescription.json";
 
         std::ifstream file(jsonPath);
-        if (!file.is_open()) {
-            return "";
-        }
+        if (!file.is_open()) return "";
 
-        std::string line;
-        std::string searchKey = "\"" + key + "\":";
-        while (std::getline(file, line)) {
-            size_t pos = line.find(searchKey);
-            if (pos != std::string::npos) {
-                size_t valueStart = pos + searchKey.length();
-                while (valueStart < line.length() && (line[valueStart] == ' ' || line[valueStart] == '\t')) {
-                    valueStart++;
-                }
+        std::stringstream ss;
+        ss << file.rdbuf();
+        return ss.str();
+    }
 
-                if (valueStart >= line.length()) break;
-
-                if (line[valueStart] == '"') {
-                    size_t start = valueStart;
-                    size_t end = line.find("\"", start + 1);
-                    if (end != std::string::npos) {
-                        return line.substr(start + 1, end - start - 1);
-                    }
-                } else {
-                    size_t end = line.find_first_of(",\n\r", valueStart);
-                    if (end != std::string::npos) {
-                        std::string value = line.substr(valueStart, end - valueStart);
-                        while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) {
-                            value.pop_back();
-                        }
-                        return value;
-                    }
-                }
+    // Finds "key":<value> anywhere in the (single) JSON text. This deliberately
+    // ignores nesting - Windrose's server description mirrors the relevant
+    // fields either at top level (DeploymentId) or under
+    // ServerDescription_Persistent (ServerName, InviteCode, MaxPlayerCount,
+    // IsPasswordProtected), but no field name occurs in both scopes with
+    // different meanings, so a first-hit search is safe and avoids a full JSON
+    // parser dependency.
+    //
+    // valueStart returns the offset just after "key":; the caller interprets
+    // the value as string / number / bool.
+    static bool FindKeyValueStart(const std::string& json, const std::string& key, size_t& valueStart) {
+        std::string needle = "\"" + key + "\"";
+        size_t pos = 0;
+        while ((pos = json.find(needle, pos)) != std::string::npos) {
+            size_t after = pos + needle.size();
+            // Allow whitespace between the key and the colon.
+            while (after < json.size() && (json[after] == ' ' || json[after] == '\t' ||
+                                           json[after] == '\r' || json[after] == '\n')) {
+                after++;
             }
+            if (after < json.size() && json[after] == ':') {
+                after++;
+                while (after < json.size() && (json[after] == ' ' || json[after] == '\t' ||
+                                               json[after] == '\r' || json[after] == '\n')) {
+                    after++;
+                }
+                valueStart = after;
+                return true;
+            }
+            pos = after;
         }
-        return "";
+        return false;
+    }
+
+    static std::string ReadJsonString(const std::string& json, const std::string& key) {
+        size_t pos;
+        if (!FindKeyValueStart(json, key, pos)) return "";
+        if (pos >= json.size() || json[pos] != '"') return "";
+        size_t start = pos + 1;
+        size_t end = json.find('"', start);
+        if (end == std::string::npos) return "";
+        return json.substr(start, end - start);
+    }
+
+    // Returns tri-state: 1 = true, 0 = false, -1 = key not found / not a bool.
+    static int ReadJsonBool(const std::string& json, const std::string& key) {
+        size_t pos;
+        if (!FindKeyValueStart(json, key, pos)) return -1;
+        if (json.compare(pos, 4, "true") == 0)  return 1;
+        if (json.compare(pos, 5, "false") == 0) return 0;
+        return -1;
+    }
+
+    // Keeps only the leading [0-9.] characters so that DeploymentId like
+    // "1.2.3-456-win64" becomes "1.2.3".
+    static std::string TrimToVersion(const std::string& s) {
+        std::string out;
+        for (char c : s) {
+            if ((c >= '0' && c <= '9') || c == '.') out.push_back(c);
+            else break;
+        }
+        return out;
     }
 
     ServerMetadata StandaloneIntegration::GetServerMetadata() {
         ServerMetadata meta;
-        meta.serverName = ReadServerInfoField("ServerName");
-        meta.inviteCode = ReadServerInfoField("InviteCode");
-        meta.deploymentId = ReadServerInfoField("DeploymentId");
-        meta.maxPlayers = ReadServerInfoField("MaxPlayerCount");
-        meta.serverAddress = ReadServerInfoField("DirectConnectionServerAddress");
-        meta.serverPort = ReadServerInfoField("DirectConnectionServerPort");
+
+        std::string raw = ReadServerDescriptionRaw();
+        if (raw.empty()) return meta;
+
+        // Under ServerDescription_Persistent
+        meta.serverName    = ReadJsonString(raw, "ServerName");
+        meta.inviteCode    = ReadJsonString(raw, "InviteCode");
+        meta.maxPlayers    = ReadJsonString(raw, "MaxPlayerCount");
+        if (meta.maxPlayers.empty()) {
+            // MaxPlayerCount is a number in JSON, not a string. Try number form.
+            size_t pos;
+            if (FindKeyValueStart(raw, "MaxPlayerCount", pos)) {
+                size_t end = raw.find_first_of(",}\n\r", pos);
+                if (end != std::string::npos) {
+                    std::string v = raw.substr(pos, end - pos);
+                    while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
+                    meta.maxPlayers = v;
+                }
+            }
+        }
+
+        // Top-level
+        meta.deploymentId  = TrimToVersion(ReadJsonString(raw, "DeploymentId"));
+
+        // Optional (present on some builds)
+        meta.serverAddress = ReadJsonString(raw, "DirectConnectionServerAddress");
+        meta.serverPort    = ReadJsonString(raw, "DirectConnectionServerPort");
+
+        int pw = ReadJsonBool(raw, "IsPasswordProtected");
+        if (pw >= 0) {
+            meta.passwordProtected = (pw == 1);
+            meta.passwordKnown = true;
+        }
+
         return meta;
     }
 
     // --- EngineSnapshot -----------------------------------------------------
 
-    EngineSnapshot::EngineSnapshot(StandaloneIntegration* engine, int refreshIntervalMs)
-        : m_engine(engine), m_intervalMs(refreshIntervalMs) {}
+    EngineSnapshot::EngineSnapshot(StandaloneIntegration* engine,
+                                   int activeIntervalMs,
+                                   int idleIntervalMs)
+        : m_engine(engine),
+          m_activeIntervalMs(activeIntervalMs),
+          m_idleIntervalMs(idleIntervalMs) {}
 
     EngineSnapshot::~EngineSnapshot() {
         Stop();
@@ -217,8 +286,18 @@ namespace UnrealEngine {
 
     void EngineSnapshot::RefreshLoop() {
         while (m_running.load(std::memory_order_acquire)) {
+            // Pick the next interval based on the *current* snapshot: empty
+            // servers refresh much more rarely, matching WindrosePlus' idle
+            // affinity behavior.
+            int interval;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                interval = m_snapshot.players.empty() ? m_idleIntervalMs
+                                                      : m_activeIntervalMs;
+            }
+
             auto nextTick = std::chrono::steady_clock::now() +
-                            std::chrono::milliseconds(m_intervalMs);
+                            std::chrono::milliseconds(interval);
             RefreshOnce();
 
             // Sleep in short slices so Stop() can break out quickly.

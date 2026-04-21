@@ -66,10 +66,12 @@ struct PlayerInfo {
 struct ServerMetadata {
     std::string serverName;
     std::string inviteCode;
-    std::string deploymentId;
+    std::string deploymentId;      // trimmed to leading [0-9.]
     std::string maxPlayers;
     std::string serverAddress;
     std::string serverPort;
+    bool        passwordProtected = false;
+    bool        passwordKnown = false; // true if ServerDescription.json contained IsPasswordProtected
 };
 
 namespace UnrealEngine {
@@ -112,7 +114,11 @@ namespace UnrealEngine {
     // mutex, and lets Get() return a cheap copy to the query handlers.
     class EngineSnapshot {
     public:
-        EngineSnapshot(StandaloneIntegration* engine, int refreshIntervalMs = 1500);
+        // activeIntervalMs is used while at least one player is present,
+        // idleIntervalMs when the last snapshot showed zero players.
+        EngineSnapshot(StandaloneIntegration* engine,
+                       int activeIntervalMs = 1500,
+                       int idleIntervalMs = 10000);
         ~EngineSnapshot();
 
         // Performs one synchronous refresh then starts the worker thread.
@@ -126,7 +132,8 @@ namespace UnrealEngine {
         void RefreshLoop();
 
         StandaloneIntegration* m_engine;
-        int m_intervalMs;
+        int m_activeIntervalMs;
+        int m_idleIntervalMs;
 
         std::atomic<bool> m_running{false};
         std::thread m_thread;

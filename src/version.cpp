@@ -146,9 +146,10 @@ void AsyncInitialize() {
 
     // Start the snapshot refresher before the query server so the first A2S
     // query already sees a populated snapshot.
-    UnrealEngine::g_Snapshot = new UnrealEngine::EngineSnapshot(UnrealEngine::g_Engine, 1500);
+    UnrealEngine::g_Snapshot = new UnrealEngine::EngineSnapshot(
+        UnrealEngine::g_Engine, /*activeMs=*/1500, /*idleMs=*/10000);
     UnrealEngine::g_Snapshot->Start();
-    LogMessage("Snapshot refresher started (interval 1500 ms)");
+    LogMessage("Snapshot refresher started (1500ms active / 10000ms idle)");
 
     g_QueryServer = new A2SServer();
     if (g_QueryServer->Start(g_Config.port, g_Config.multiHome)) {

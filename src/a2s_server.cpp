@@ -344,7 +344,10 @@ void A2SServer::SendInfo(const sockaddr_in& to) {
     w.WriteU8(g_Config.botCount);      // Bots
     w.WriteU8(A2S::SERVER_TYPE_DEDICATED);
     w.WriteU8(A2S::ENV_WINDOWS);
-    w.WriteU8(g_Config.privateServer ? 1 : 0);
+    // Prefer IsPasswordProtected from ServerDescription.json when available,
+    // fall back to the compile-time default otherwise.
+    bool isPrivate = meta.passwordKnown ? meta.passwordProtected : g_Config.privateServer;
+    w.WriteU8(isPrivate ? 1 : 0);
     w.WriteU8(g_Config.vacSecured ? 1 : 0);
     w.WriteCString(version);           // Version string
     // EDF (Extra Data Flag): omit to keep packet minimal.
@@ -369,8 +372,14 @@ void A2SServer::SendPlayer(const sockaddr_in& to) {
 
     uint8_t index = 0;
     for (const auto& p : players) {
+        std::string name = WStringToUtf8(p.playerName);
+        if (name.empty()) {
+            // Mirrors WindrosePlus' fallback: we can't access PlayerId without
+            // a verified offset, so the stable list index is used instead.
+            name = "Player " + std::to_string((int)index + 1);
+        }
         w.WriteU8(index++);
-        w.WriteCString(WStringToUtf8(p.playerName));
+        w.WriteCString(name);
         w.WriteI32(p.score);
         w.WriteF32(p.connectedSeconds);
     }

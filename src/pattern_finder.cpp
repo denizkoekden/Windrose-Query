@@ -128,23 +128,29 @@ std::vector<uintptr_t> PatternScanner::FindAllPlayerStates(uintptr_t gobjectsAdd
         if (playerName->Length < 2 || playerName->Length > 50) continue;
 
         if (IsBadReadPtr(accountId, sizeof(FString))) continue;
-        if (accountId->Length < 32 || accountId->Length > 33) continue;
 
         const wchar_t* nameData = playerName->GetData();
-        const wchar_t* idData = accountId->GetData();
 
         bool nameValid = playerName->IsInline() || !IsBadReadPtr(nameData, playerName->Length * sizeof(wchar_t));
-        bool idValid = accountId->IsInline() || !IsBadReadPtr(idData, accountId->Length * sizeof(wchar_t));
-
-        if (!nameValid || !idValid) continue;
+        if (!nameValid) continue;
 
         wchar_t nameBuffer[51] = {0};
         wcsncpy_s(nameBuffer, 51, nameData, min(playerName->Length, 50));
 
-        wchar_t idBuffer[101] = {0};
-        wcsncpy_s(idBuffer, 101, idData, min(accountId->Length, 100));
+        // AccountId is R5-specific (0x0388) and populated asynchronously after
+        // a player connects, so we no longer require it. If it is present we
+        // still use it as a strong signal; if it looks like something other
+        // than a hex account id we reject as a false positive.
+        bool hasAccountId = (accountId->Length == 32 || accountId->Length == 33);
+        if (hasAccountId) {
+            const wchar_t* idData = accountId->GetData();
+            bool idValid = accountId->IsInline() ||
+                           !IsBadReadPtr(idData, accountId->Length * sizeof(wchar_t));
+            if (!idValid) continue;
 
-        if (accountId->Length == 32 || accountId->Length == 33) {
+            wchar_t idBuffer[101] = {0};
+            wcsncpy_s(idBuffer, 101, idData, min(accountId->Length, 100));
+
             bool isHex = true;
             for (int j = 0; j < 32; j++) {
                 wchar_t c = idBuffer[j];
@@ -154,7 +160,8 @@ std::vector<uintptr_t> PatternScanner::FindAllPlayerStates(uintptr_t gobjectsAdd
                 }
             }
             if (!isHex) continue;
-        } else {
+        } else if (accountId->Length != 0) {
+            // Non-empty but not an account id => most likely a false positive.
             continue;
         }
 
