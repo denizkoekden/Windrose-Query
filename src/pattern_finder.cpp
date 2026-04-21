@@ -3,23 +3,8 @@
 
 extern void LogMessage(const std::string& message);
 
-struct FString {
-    union {
-        wchar_t* Data;
-        wchar_t InlineData[12];
-    };
-    int32_t Length;
-    int32_t Max;
-
-    bool IsInline() const { return Max == 0; }
-
-    const wchar_t* GetData() const {
-        return IsInline() ? InlineData : Data;
-    }
-};
-
 struct FUObjectItem {
-    void* Object;
+    void*   Object;
     int32_t Flags;
     int32_t ClusterRootIndex;
     int32_t SerialNumber;
@@ -47,7 +32,24 @@ struct FUObjectArray {
 
         return ChunkPtr[InChunkIdx].Object;
     }
+
+    FUObjectItem* GetItemByIndex(int32_t Index) const {
+        int32_t ChunkIndex = Index / ElementsPerChunk;
+        int32_t InChunkIdx = Index % ElementsPerChunk;
+
+        if (Index < 0 || ChunkIndex >= NumChunks || Index >= NumElements)
+            return nullptr;
+
+        FUObjectItem* ChunkPtr = Objects[ChunkIndex];
+        if (!ChunkPtr) return nullptr;
+
+        return &ChunkPtr[InChunkIdx];
+    }
 };
+
+// UObject::ObjectFlags bitmask. Only the one we need here.
+// Reference: SDK/Basic.hpp - EObjectFlags::RF_ClassDefaultObject
+constexpr int32_t RF_ClassDefaultObject = 0x00000010;
 
 uintptr_t PatternScanner::FindPattern(uintptr_t start, size_t size, const char* pattern, const char* mask) {
     size_t patternLen = strlen(mask);
@@ -80,119 +82,86 @@ uintptr_t PatternScanner::ScanForGObjects(uintptr_t moduleBase, size_t moduleSiz
     return gobjectsAddr;
 }
 
-std::vector<uintptr_t> PatternScanner::FindAllPlayerStates(uintptr_t gobjectsAddr) {
-    std::vector<uintptr_t> playerStates;
+// Layout constants used only by the heuristic. Offsets verified in Ghidra on
+// a live Windrose build.
+namespace {
+    // AGameStateBase
+    constexpr size_t GS_AuthorityGameMode = 0x02B0;
+    constexpr size_t GS_PlayerArray       = 0x02C0;
 
-    if (!gobjectsAddr) return playerStates;
+    // AGameModeBase
+    constexpr size_t GM_GameSession       = 0x0300;
+
+    // AGameSession
+    constexpr size_t GSession_MaxPlayers  = 0x02AC;
+
+    // UObject header
+    constexpr size_t UObject_ObjectFlags  = 0x0008;
+}
+
+uintptr_t PatternScanner::ScanForGameState(uintptr_t gobjectsAddr) {
+    if (!gobjectsAddr) return 0;
 
     FUObjectArray* GObjects = (FUObjectArray*)gobjectsAddr;
-
-    if (!GObjects || IsBadReadPtr(GObjects, 32)) {
-        LogMessage("Invalid GObjects pointer");
-        return playerStates;
+    if (IsBadReadPtr(GObjects, sizeof(FUObjectArray))) {
+        LogMessage("ScanForGameState: GObjects pointer not readable");
+        return 0;
     }
-
-    char debugMsg[256];
-    sprintf_s(debugMsg, "GObjects: NumElements=%d, MaxElements=%d, NumChunks=%d",
-        GObjects->NumElements, GObjects->MaxElements, GObjects->NumChunks);
-    LogMessage(debugMsg);
 
     if (GObjects->NumElements <= 0 || GObjects->NumElements > 2000000) {
-        LogMessage("Invalid NumElements");
-        return playerStates;
+        return 0;
     }
 
-    int scannedCount = 0;
-    int validCount = 0;
+    int scanned = 0;
+    int candidates = 0;
 
     for (int i = 0; i < GObjects->NumElements; i++) {
-        scannedCount++;
-
         void* objPtr = GObjects->GetByIndex(i);
         if (!objPtr) continue;
 
         uintptr_t obj = (uintptr_t)objPtr;
-        if (IsBadReadPtr((void*)obj, 0x400)) continue;
+        // Reading up to the PlayerArray tail (0x02C0 + 16).
+        if (IsBadReadPtr((void*)obj, GS_PlayerArray + sizeof(TArrayLayout))) continue;
 
-        validCount++;
+        scanned++;
 
-        // Player validation offsets from SDK
-        // Reference: SDK/Engine_classes.hpp - APlayerState::PlayerNamePrivate at 0x0340
-        FString* playerName = (FString*)(obj + 0x0340);
+        // Skip CDOs - those have a valid layout but no live data.
+        int32_t flags = *(int32_t*)(obj + UObject_ObjectFlags);
+        if (flags & RF_ClassDefaultObject) continue;
 
-        // Reference: SDK/R5DataKeepers_classes.hpp + R5DataKeepers_structs.hpp
-        // AccountData at 0x0378, AccountId at +0x0010 = 0x0388
-        FString* accountId = (FString*)(obj + 0x0388);
+        // AuthorityGameMode is only set on the server copy of GameState.
+        uintptr_t gameMode = *(uintptr_t*)(obj + GS_AuthorityGameMode);
+        if (!gameMode) continue;
+        if (IsBadReadPtr((void*)gameMode, GM_GameSession + sizeof(void*))) continue;
 
-        if (IsBadReadPtr(playerName, sizeof(FString))) continue;
-        if (playerName->Length < 2 || playerName->Length > 50) continue;
+        // PlayerArray sanity check.
+        TArrayLayout* arr = (TArrayLayout*)(obj + GS_PlayerArray);
+        if (arr->Num < 0 || arr->Num > 256)           continue;
+        if (arr->Max < arr->Num || arr->Max > 1024)   continue;
+        if (arr->Num > 0 && (!arr->Data || IsBadReadPtr(arr->Data, arr->Num * sizeof(void*)))) continue;
 
-        if (IsBadReadPtr(accountId, sizeof(FString))) continue;
+        // Follow GameMode->GameSession->MaxPlayers as a final sanity gate. A
+        // random unrelated UObject is extremely unlikely to chain cleanly
+        // through three pointers landing on a plausible MaxPlayers value.
+        uintptr_t gameSession = *(uintptr_t*)(gameMode + GM_GameSession);
+        if (!gameSession) continue;
+        if (IsBadReadPtr((void*)gameSession, GSession_MaxPlayers + sizeof(int32_t))) continue;
+        int32_t maxPlayers = *(int32_t*)(gameSession + GSession_MaxPlayers);
+        if (maxPlayers < 0 || maxPlayers > 1024) continue;
 
-        const wchar_t* nameData = playerName->GetData();
+        candidates++;
 
-        bool nameValid = playerName->IsInline() || !IsBadReadPtr(nameData, playerName->Length * sizeof(wchar_t));
-        if (!nameValid) continue;
-
-        wchar_t nameBuffer[51] = {0};
-        wcsncpy_s(nameBuffer, 51, nameData, min(playerName->Length, 50));
-
-        // AccountId is R5-specific (0x0388) and populated asynchronously after
-        // a player connects, so we no longer require it. If it is present we
-        // still use it as a strong signal; if it looks like something other
-        // than a hex account id we reject as a false positive.
-        bool hasAccountId = (accountId->Length == 32 || accountId->Length == 33);
-        if (hasAccountId) {
-            const wchar_t* idData = accountId->GetData();
-            bool idValid = accountId->IsInline() ||
-                           !IsBadReadPtr(idData, accountId->Length * sizeof(wchar_t));
-            if (!idValid) continue;
-
-            wchar_t idBuffer[101] = {0};
-            wcsncpy_s(idBuffer, 101, idData, min(accountId->Length, 100));
-
-            bool isHex = true;
-            for (int j = 0; j < 32; j++) {
-                wchar_t c = idBuffer[j];
-                if (!((c >= L'0' && c <= L'9') || (c >= L'A' && c <= L'F') || (c >= L'a' && c <= L'f'))) {
-                    isHex = false;
-                    break;
-                }
-            }
-            if (!isHex) continue;
-        } else if (accountId->Length != 0) {
-            // Non-empty but not an account id => most likely a false positive.
-            continue;
-        }
-
-        bool hasValidChars = false;
-        for (int j = 0; j < playerName->Length && j < 50; j++) {
-            if (nameBuffer[j] >= 32 && nameBuffer[j] <= 126) {
-                hasValidChars = true;
-                break;
-            }
-        }
-
-        if (!hasValidChars) continue;
-
-        // Reference: SDK/Engine_classes.hpp - APlayerState flags at 0x02B2
-        // Used to filter inactive/spectator players
-        uint8_t* playerFlagsPtr = (uint8_t*)(obj + 0x02B2);
-        if (IsBadReadPtr(playerFlagsPtr, 1)) continue;
-
-        uint8_t playerFlags = *playerFlagsPtr;
-        bool bIsInactive = (playerFlags & (1 << 5)) != 0;
-        bool bOnlySpectator = (playerFlags & (1 << 2)) != 0;
-
-        if (bIsInactive || bOnlySpectator) continue;
-
-        playerStates.push_back(obj);
+        char msg[256];
+        sprintf_s(msg,
+            "GameState located at 0x%llX (idx %d, players=%d/%d, gameMode=0x%llX, session=0x%llX)",
+            obj, i, arr->Num, maxPlayers, gameMode, gameSession);
+        LogMessage(msg);
+        return obj;
     }
 
-    char summary[512];
-    sprintf_s(summary, "Scanned %d/%d objects, %d valid, found %zu player states",
-        scannedCount, GObjects->NumElements, validCount, playerStates.size());
-    LogMessage(summary);
-
-    return playerStates;
+    char msg[160];
+    sprintf_s(msg, "ScanForGameState: no match (scanned %d of %d objects, %d candidates)",
+              scanned, GObjects->NumElements, candidates);
+    LogMessage(msg);
+    return 0;
 }

@@ -93,23 +93,37 @@ Every push to this repository runs the `build` workflow and attaches the resulti
 ### How It Works
 
 1. **DLL Proxy Injection** - `version.dll` proxies the system `version.dll`, forwarding all `VerQueryValue*`/`GetFileVersionInfo*` exports while attaching to the host process.
-2. **GObjects Scanning** - Locates Unreal Engine's global object array using the offset from the Dumper7 SDK and walks it on each query.
-3. **Player Validation** - Validates player states via known SDK offsets:
-   - `0x0340` - PlayerName (FString)
-   - `0x0388` - AccountId (FString)
-   - `0x02B2` - PlayerFlags (filters inactive/spectator)
-   - `0x02B8` - Score (float)
-   - `0x02C8` - StartTime (int32)
-4. **A2S Protocol** - Implements the Valve Source server query protocol:
+2. **GObjects Location** - Uses the hardcoded Dumper7 offset inside the host module to reach Unreal's global object array.
+3. **GameState Resolution** - Walks GObjects *once* (then caches) to locate the live `AGameStateBase` instance. A candidate passes the filter only when it is not a CDO, its `AuthorityGameMode` pointer is valid, its `PlayerArray` TArray looks sane, and `GameMode -> GameSession -> MaxPlayers` chains cleanly.
+4. **Player Enumeration** - Reads `APlayerState*` entries directly out of `AGameStateBase::PlayerArray` (no full scan). Ghidra-verified offsets:
+
+   | Object | Field | Offset | Type |
+   |---|---|---|---|
+   | `AGameStateBase` | `AuthorityGameMode` | `0x02B0` | `AGameModeBase*` |
+   | `AGameStateBase` | `PlayerArray`       | `0x02C0` | `TArray<APlayerState*>` |
+   | `AGameModeBase`  | `GameSession`       | `0x0300` | `AGameSession*` |
+   | `AGameSession`   | `MaxPlayers`        | `0x02AC` | `int32` |
+   | `APlayerState`   | `Score`             | `0x02A8` | `float` |
+   | `APlayerState`   | `PlayerId`          | `0x02AC` | `int32` |
+   | `APlayerState`   | `CompressedPing`    | `0x02B0` | `uint8` (×4 ms) |
+   | `APlayerState`   | `PlayerFlags`       | `0x02B2` | `uint8` bitfield |
+   | `APlayerState`   | `StartTime`         | `0x02B4` | `float` |
+   | `APlayerState`   | `PawnPrivate`       | `0x0320` | `APawn*` |
+   | `APlayerState`   | `PlayerNamePrivate` | `0x0340` | `FString` |
+   | `APlayerState`   | `AccountId`         | `0x0388` | `FString` (R5 extension) |
+
+   Zombie PlayerStates (client dropped but not yet GC'd) are filtered out by requiring either `PawnPrivate != null` or `CompressedPing > 0`, and inactive/spectator players are skipped via the `PlayerFlags` bits `0x20` and `0x04`.
+5. **A2S Duration** - `connectedSeconds` is tracked per PlayerState pointer inside the DLL: the first refresh that observes a new `APlayerState*` stamps `steady_clock::now()`, and subsequent A2S_PLAYER responses report the delta. Entries drop out when the PlayerState leaves `PlayerArray`.
+6. **A2S Protocol** - Implements the Valve Source server query protocol:
    - Request kinds: `0x54` INFO, `0x55` PLAYER, `0x56` RULES, `0x69` PING
    - Response kinds: `0x49` INFO, `0x44` PLAYER, `0x45` RULES, `0x41` CHALLENGE
    - Challenge tokens are issued per source address and validated on PLAYER/RULES/INFO.
 
 ### SDK References
 
-All offsets are documented with references to the Dumper7 SDK:
-- `SDK/Basic.hpp` - GObjects offsets
-- `SDK/Engine_classes.hpp` - `APlayerState` layout
+All offsets above were verified in Ghidra against a live Windrose build. For the upstream UE / R5 layouts they mirror, see:
+- `SDK/Basic.hpp` - GObjects / `FUObjectArray`
+- `SDK/Engine_classes.hpp` - `AGameStateBase`, `AGameModeBase`, `AGameSession`, `APlayerState`
 - `SDK/R5DataKeepers_classes.hpp` - Account data structure
 
 ### Credits

@@ -10,45 +10,45 @@ extern void LogMessage(const std::string& message);
 
 #pragma comment(lib, "Psapi.lib")
 
+// Layout offsets verified in Ghidra against a live Windrose server build.
+//
+// AGameStateBase
+namespace {
+    constexpr size_t GS_AuthorityGameMode = 0x02B0;  // AGameModeBase*
+    constexpr size_t GS_PlayerArray       = 0x02C0;  // TArray<APlayerState*>
+
+    // AGameModeBase
+    constexpr size_t GM_GameSession       = 0x0300;  // AGameSession*
+
+    // AGameSession
+    constexpr size_t GSession_MaxPlayers  = 0x02AC;  // int32
+
+    // APlayerState
+    constexpr size_t PS_Score             = 0x02A8;  // float
+    constexpr size_t PS_PlayerId          = 0x02AC;  // int32
+    constexpr size_t PS_CompressedPing    = 0x02B0;  // uint8 (ping in 4ms units)
+    constexpr size_t PS_PlayerFlags       = 0x02B2;  // uint8 bitfield
+    constexpr size_t PS_StartTime         = 0x02B4;  // float (seconds since server start)
+    constexpr size_t PS_PawnPrivate       = 0x0320;  // APawn*
+    constexpr size_t PS_PlayerNamePrivate = 0x0340;  // FString
+
+    // AR5DataKeeper_PlayerState::AccountData at 0x0378, AccountId at +0x0010.
+    constexpr size_t PS_AccountId         = 0x0388;  // FString
+
+    // APlayerState flags bitfield (at PS_PlayerFlags)
+    constexpr uint8_t PSF_IsInactive      = 1u << 5;
+    constexpr uint8_t PSF_OnlySpectator   = 1u << 2;
+}
+
 namespace UnrealEngine {
     StandaloneIntegration* g_Engine = nullptr;
     EngineSnapshot* g_Snapshot = nullptr;
 
     StandaloneIntegration::StandaloneIntegration()
-        : moduleBase(0), moduleSize(0), GObjectsPtr(0), GNamesPtr(0) {
+        : moduleBase(0), moduleSize(0), GObjectsPtr(0), GameStatePtr(0) {
     }
 
     StandaloneIntegration::~StandaloneIntegration() {
-    }
-
-    std::vector<uint8_t> StandaloneIntegration::FindPattern(const char* pattern, const char* mask) {
-        std::vector<uint8_t> result;
-        size_t patternLength = strlen(mask);
-
-        for (size_t i = 0; i < moduleSize - patternLength; i++) {
-            bool found = true;
-            for (size_t j = 0; j < patternLength; j++) {
-                if (mask[j] != '?' && pattern[j] != *reinterpret_cast<char*>(moduleBase + i + j)) {
-                    found = false;
-                    break;
-                }
-            }
-            if (found) {
-                for (size_t j = 0; j < 8; j++) {
-                    result.push_back(*reinterpret_cast<uint8_t*>(moduleBase + i + j));
-                }
-                return result;
-            }
-        }
-        return result;
-    }
-
-    uintptr_t StandaloneIntegration::FindGObjects() {
-        return PatternScanner::ScanForGObjects(moduleBase, moduleSize);
-    }
-
-    uintptr_t StandaloneIntegration::FindGNames() {
-        return 0;
     }
 
     bool StandaloneIntegration::Initialize() {
@@ -72,65 +72,124 @@ namespace UnrealEngine {
         LogMessage(std::string("Standalone: Module base: ") + hexBuffer);
         LogMessage("Standalone: Module size: " + std::to_string(moduleSize));
 
-        GObjectsPtr = FindGObjects();
-
+        GObjectsPtr = PatternScanner::ScanForGObjects(moduleBase, moduleSize);
         if (GObjectsPtr) {
             sprintf_s(hexBuffer, "0x%llX", GObjectsPtr);
             LogMessage(std::string("GObjects found at: ") + hexBuffer);
         } else {
-            LogMessage("WARNING: GObjects not found - player queries will return empty");
+            LogMessage("WARNING: GObjects not found - queries will return empty player lists");
         }
 
+        // GameState is resolved lazily on the first refresh; at DLL load time
+        // the world has not been constructed yet.
         LogMessage("Standalone: Integration initialized");
         return true;
+    }
+
+    bool StandaloneIntegration::IsGameStateValid(uintptr_t gameState) const {
+        if (!gameState) return false;
+        if (IsBadReadPtr((void*)gameState, GS_PlayerArray + sizeof(TArrayLayout))) return false;
+
+        uintptr_t gameMode = *(uintptr_t*)(gameState + GS_AuthorityGameMode);
+        if (!gameMode || IsBadReadPtr((void*)gameMode, 8)) return false;
+
+        TArrayLayout* arr = (TArrayLayout*)(gameState + GS_PlayerArray);
+        if (arr->Num < 0 || arr->Num > 256)         return false;
+        if (arr->Max < arr->Num || arr->Max > 1024) return false;
+        if (arr->Num > 0 && (!arr->Data || IsBadReadPtr(arr->Data, arr->Num * sizeof(void*)))) return false;
+
+        return true;
+    }
+
+    uintptr_t StandaloneIntegration::ResolveGameState() {
+        if (GameStatePtr && IsGameStateValid(GameStatePtr)) return GameStatePtr;
+
+        GameStatePtr = PatternScanner::ScanForGameState(GObjectsPtr);
+        return GameStatePtr;
     }
 
     std::vector<PlayerInfo> StandaloneIntegration::GetAllPlayers() {
         std::vector<PlayerInfo> players;
 
-        if (!GObjectsPtr) {
+        uintptr_t gameState = ResolveGameState();
+        if (!gameState) return players;
+
+        TArrayLayout* arr = (TArrayLayout*)(gameState + GS_PlayerArray);
+        int32_t num = arr->Num;
+        if (num <= 0 || !arr->Data) {
+            m_firstSeen.clear();
             return players;
         }
 
-        auto playerStates = PatternScanner::FindAllPlayerStates(GObjectsPtr);
+        uintptr_t* entries = (uintptr_t*)arr->Data;
+        auto now = std::chrono::steady_clock::now();
 
-        for (uintptr_t obj : playerStates) {
+        std::map<uintptr_t, std::chrono::steady_clock::time_point> seenThisPass;
+
+        for (int i = 0; i < num && i < 256; i++) {
+            uintptr_t ps = entries[i];
+            if (!ps) continue;
+            if (IsBadReadPtr((void*)ps, PS_AccountId + sizeof(FString))) continue;
+
+            // Drop inactive / spectator-only entries.
+            uint8_t flags = *(uint8_t*)(ps + PS_PlayerFlags);
+            if (flags & (PSF_IsInactive | PSF_OnlySpectator)) continue;
+
+            // Zombie filter: a stale PlayerState lingers after a client drop
+            // until GC runs. Require either a valid pawn or a live ping, both
+            // of which are cleared on disconnect before the PS is removed.
+            uintptr_t pawn = *(uintptr_t*)(ps + PS_PawnPrivate);
+            uint8_t compressedPing = *(uint8_t*)(ps + PS_CompressedPing);
+            if (!pawn && compressedPing == 0) continue;
+
             PlayerInfo info;
-            info.playerStatePtr = obj;
+            info.playerStatePtr = ps;
 
-            // PlayerNamePrivate offset in APlayerState
-            // Reference: SDK/Engine_classes.hpp - APlayerState::PlayerNamePrivate at 0x0340
-            FString* namePtr = (FString*)(obj + 0x0340);
-            if (namePtr && namePtr->Length > 0) {
-                info.playerName = namePtr->ToString();
+            FString* namePtr = (FString*)(ps + PS_PlayerNamePrivate);
+            if (namePtr->Length > 0 && namePtr->Length <= 64) {
+                const wchar_t* data = namePtr->GetData();
+                if (namePtr->IsInline() ||
+                    !IsBadReadPtr((void*)data, namePtr->Length * sizeof(wchar_t))) {
+                    info.playerName = std::wstring(data, namePtr->Length);
+                }
             }
 
-            // AccountId offset in AR5DataKeeper_PlayerState
-            // Reference: SDK/R5DataKeepers_classes.hpp - AR5DataKeeper_PlayerState::AccountData at 0x0378
-            // Reference: SDK/R5DataKeepers_structs.hpp - FR5DataKeeper_AccountData::AccountId at +0x0010
-            // Total offset: 0x0378 + 0x0010 = 0x0388
-            FString* idPtr = (FString*)(obj + 0x0388);
-            if (idPtr && idPtr->Length > 0) {
-                std::wstring idW = idPtr->ToString();
-                info.accountId = std::string(idW.begin(), idW.end());
+            FString* idPtr = (FString*)(ps + PS_AccountId);
+            if (idPtr->Length > 0 && idPtr->Length <= 64) {
+                const wchar_t* data = idPtr->GetData();
+                if (idPtr->IsInline() ||
+                    !IsBadReadPtr((void*)data, idPtr->Length * sizeof(wchar_t))) {
+                    std::wstring w(data, idPtr->Length);
+                    info.accountId = std::string(w.begin(), w.end());
+                }
             }
 
-            // Score offset in APlayerState
-            // Reference: SDK/Engine_classes.hpp - APlayerState::Score at 0x02B8 (float)
-            float* scorePtr = (float*)(obj + 0x02B8);
-            if (!IsBadReadPtr(scorePtr, sizeof(float))) {
-                info.score = (int32_t)*scorePtr;
-            }
+            float score = *(float*)(ps + PS_Score);
+            info.score = (int32_t)score;
 
-            // StartTime offset in APlayerState (seconds since server start)
-            // Reference: SDK/Engine_classes.hpp - APlayerState::StartTime at 0x02C8 (int32)
-            int32_t* startTimePtr = (int32_t*)(obj + 0x02C8);
-            if (!IsBadReadPtr(startTimePtr, sizeof(int32_t))) {
-                info.connectedSeconds = (float)*startTimePtr;
+            // A2S duration = seconds since we first saw this PlayerState. Real
+            // "seconds since connect" would require AGameState::
+            // ReplicatedWorldTimeSeconds which we don't have a verified offset
+            // for; first-seen is accurate to within the refresh interval and
+            // survives across multiple queries as long as the PS stays in
+            // PlayerArray.
+            auto it = m_firstSeen.find(ps);
+            std::chrono::steady_clock::time_point firstSeen;
+            if (it != m_firstSeen.end()) {
+                firstSeen = it->second;
+            } else {
+                firstSeen = now;
             }
+            seenThisPass[ps] = firstSeen;
+
+            auto secs = std::chrono::duration<float>(now - firstSeen).count();
+            info.connectedSeconds = secs;
 
             players.push_back(info);
         }
+
+        // Prune PlayerStates that no longer appear in PlayerArray.
+        m_firstSeen = std::move(seenThisPass);
 
         return players;
     }
@@ -223,36 +282,53 @@ namespace UnrealEngine {
         ServerMetadata meta;
 
         std::string raw = ReadServerDescriptionRaw();
-        if (raw.empty()) return meta;
-
-        // Under ServerDescription_Persistent
-        meta.serverName    = ReadJsonString(raw, "ServerName");
-        meta.inviteCode    = ReadJsonString(raw, "InviteCode");
-        meta.maxPlayers    = ReadJsonString(raw, "MaxPlayerCount");
-        if (meta.maxPlayers.empty()) {
-            // MaxPlayerCount is a number in JSON, not a string. Try number form.
-            size_t pos;
-            if (FindKeyValueStart(raw, "MaxPlayerCount", pos)) {
-                size_t end = raw.find_first_of(",}\n\r", pos);
-                if (end != std::string::npos) {
-                    std::string v = raw.substr(pos, end - pos);
-                    while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
-                    meta.maxPlayers = v;
+        if (!raw.empty()) {
+            // Under ServerDescription_Persistent
+            meta.serverName    = ReadJsonString(raw, "ServerName");
+            meta.inviteCode    = ReadJsonString(raw, "InviteCode");
+            meta.maxPlayers    = ReadJsonString(raw, "MaxPlayerCount");
+            if (meta.maxPlayers.empty()) {
+                // MaxPlayerCount is a number in JSON, not a string. Try number form.
+                size_t pos;
+                if (FindKeyValueStart(raw, "MaxPlayerCount", pos)) {
+                    size_t end = raw.find_first_of(",}\n\r", pos);
+                    if (end != std::string::npos) {
+                        std::string v = raw.substr(pos, end - pos);
+                        while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
+                        meta.maxPlayers = v;
+                    }
                 }
+            }
+
+            // Top-level
+            meta.deploymentId  = TrimToVersion(ReadJsonString(raw, "DeploymentId"));
+
+            // Optional (present on some builds)
+            meta.serverAddress = ReadJsonString(raw, "DirectConnectionServerAddress");
+            meta.serverPort    = ReadJsonString(raw, "DirectConnectionServerPort");
+
+            int pw = ReadJsonBool(raw, "IsPasswordProtected");
+            if (pw >= 0) {
+                meta.passwordProtected = (pw == 1);
+                meta.passwordKnown = true;
             }
         }
 
-        // Top-level
-        meta.deploymentId  = TrimToVersion(ReadJsonString(raw, "DeploymentId"));
-
-        // Optional (present on some builds)
-        meta.serverAddress = ReadJsonString(raw, "DirectConnectionServerAddress");
-        meta.serverPort    = ReadJsonString(raw, "DirectConnectionServerPort");
-
-        int pw = ReadJsonBool(raw, "IsPasswordProtected");
-        if (pw >= 0) {
-            meta.passwordProtected = (pw == 1);
-            meta.passwordKnown = true;
+        // If the live GameMode->GameSession chain is reachable, prefer the
+        // authoritative in-memory MaxPlayers. This stays correct across runtime
+        // changes that the JSON dump hasn't caught up to yet.
+        uintptr_t gameState = ResolveGameState();
+        if (gameState) {
+            uintptr_t gameMode = *(uintptr_t*)(gameState + GS_AuthorityGameMode);
+            if (gameMode && !IsBadReadPtr((void*)gameMode, GM_GameSession + sizeof(void*))) {
+                uintptr_t session = *(uintptr_t*)(gameMode + GM_GameSession);
+                if (session && !IsBadReadPtr((void*)session, GSession_MaxPlayers + sizeof(int32_t))) {
+                    int32_t mp = *(int32_t*)(session + GSession_MaxPlayers);
+                    if (mp > 0 && mp <= 1024) {
+                        meta.maxPlayers = std::to_string(mp);
+                    }
+                }
+            }
         }
 
         return meta;

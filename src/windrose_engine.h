@@ -81,11 +81,17 @@ namespace UnrealEngine {
         size_t moduleSize;
 
         uintptr_t GObjectsPtr;
-        uintptr_t GNamesPtr;
+        // Cached live AGameStateBase*. Resolved lazily on the first call to
+        // GetAllPlayers() after Initialize(), and re-resolved if it later
+        // fails the same validation the scanner applies.
+        uintptr_t GameStatePtr;
 
-        std::vector<uint8_t> FindPattern(const char* pattern, const char* mask);
-        uintptr_t FindGObjects();
-        uintptr_t FindGNames();
+        // Per-PlayerState first-seen time, used for A2S duration. Entries for
+        // PlayerStates that drop out of PlayerArray are pruned on each refresh.
+        std::map<uintptr_t, std::chrono::steady_clock::time_point> m_firstSeen;
+
+        bool IsGameStateValid(uintptr_t gameState) const;
+        uintptr_t ResolveGameState();
 
     public:
         StandaloneIntegration();
