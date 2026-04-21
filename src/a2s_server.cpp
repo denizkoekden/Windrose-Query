@@ -232,20 +232,10 @@ void A2SServer::HandleDatagram(const uint8_t* data, int size, const sockaddr_in&
             std::string payload = r.ReadCString();
             if (payload != A2S::INFO_PAYLOAD) return;
 
-            // If a challenge is provided, verify it. Otherwise issue one.
-            if (r.Remaining() >= 4) {
-                int32_t token = r.ReadI32();
-                if (VerifyChallenge(from, token)) {
-                    SendInfo(from);
-                } else {
-                    SendChallenge(from, A2S::REQ_INFO);
-                }
-            } else {
-                // Spec allows responding directly to A2S_INFO without challenge
-                // but modern clients retry with challenge. We send the challenge
-                // to match Valve's current behavior.
-                SendChallenge(from, A2S::REQ_INFO);
-            }
+            // Match proven query behavior: any valid A2S_INFO
+            // prefix gets the info response directly. Some admin tools never
+            // retry INFO after an S2C_CHALLENGE.
+            SendInfo(from);
             break;
         }
         case A2S::REQ_PLAYER: {
@@ -272,6 +262,10 @@ void A2SServer::HandleDatagram(const uint8_t* data, int size, const sockaddr_in&
                 break;
             }
             SendRules(from);
+            break;
+        }
+        case A2S::REQ_CHALLENGE: {
+            SendChallenge(from, A2S::REQ_CHALLENGE);
             break;
         }
         case A2S::REQ_PING: {
@@ -350,7 +344,7 @@ void A2SServer::SendInfo(const sockaddr_in& to) {
     w.WriteU8(isPrivate ? 1 : 0);
     w.WriteU8(g_Config.vacSecured ? 1 : 0);
     w.WriteCString(version);           // Version string
-    // EDF (Extra Data Flag): omit to keep packet minimal.
+    w.WriteU8(0);                      // EDF: no optional fields
 
     sendto(udpSocket, (const char*)w.data().data(), (int)w.size(), 0,
            (const sockaddr*)&to, sizeof(to));

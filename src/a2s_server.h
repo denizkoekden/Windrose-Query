@@ -16,10 +16,11 @@
 // Reference: https://developer.valvesoftware.com/wiki/Server_queries
 namespace A2S {
     // Request headers (single-packet form: 0xFFFFFFFF prefix + byte)
-    constexpr uint8_t REQ_INFO    = 0x54; // A2S_INFO
-    constexpr uint8_t REQ_PLAYER  = 0x55; // A2S_PLAYER
-    constexpr uint8_t REQ_RULES   = 0x56; // A2S_RULES
-    constexpr uint8_t REQ_PING    = 0x69; // A2S_PING (legacy)
+    constexpr uint8_t REQ_INFO      = 0x54; // A2S_INFO
+    constexpr uint8_t REQ_PLAYER    = 0x55; // A2S_PLAYER
+    constexpr uint8_t REQ_RULES     = 0x56; // A2S_RULES
+    constexpr uint8_t REQ_CHALLENGE = 0x57; // A2S_SERVERQUERY_GETCHALLENGE (legacy)
+    constexpr uint8_t REQ_PING      = 0x69; // A2S_PING (legacy)
 
     // Response headers
     constexpr uint8_t RESP_INFO      = 0x49; // 'I'
