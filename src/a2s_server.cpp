@@ -114,8 +114,9 @@ A2SServer::~A2SServer() {
     WSACleanup();
 }
 
-bool A2SServer::Start(int port) {
+bool A2SServer::Start(int port, const std::string& bindHost) {
     m_Port = port;
+    m_BindHost = bindHost;
     if (running) return false;
 
     udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -126,11 +127,25 @@ bool A2SServer::Start(int port) {
 
     sockaddr_in serverAddr{};
     serverAddr.sin_family = AF_INET;
-    serverAddr.sin_addr.s_addr = INADDR_ANY;
     serverAddr.sin_port = htons((u_short)m_Port);
 
+    if (m_BindHost.empty()) {
+        serverAddr.sin_addr.s_addr = INADDR_ANY;
+    } else {
+        if (InetPtonA(AF_INET, m_BindHost.c_str(), &serverAddr.sin_addr) != 1) {
+            LogMessage("A2S: Invalid -MultiHome address '" + m_BindHost +
+                       "', falling back to INADDR_ANY");
+            serverAddr.sin_addr.s_addr = INADDR_ANY;
+            m_BindHost.clear();
+        }
+    }
+
     if (bind(udpSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
-        LogMessage("A2S: Failed to bind UDP socket on port " + std::to_string(m_Port));
+        int err = WSAGetLastError();
+        LogMessage("A2S: Failed to bind UDP socket on " +
+                   (m_BindHost.empty() ? std::string("0.0.0.0") : m_BindHost) +
+                   ":" + std::to_string(m_Port) +
+                   " (WSA error " + std::to_string(err) + ")");
         closesocket(udpSocket);
         udpSocket = INVALID_SOCKET;
         return false;
@@ -139,7 +154,9 @@ bool A2SServer::Start(int port) {
     running = true;
     listenerThread = new std::thread(&A2SServer::ListenerLoop, this);
 
-    LogMessage("A2S: Query server started on UDP port " + std::to_string(m_Port));
+    LogMessage("A2S: Query server listening on " +
+               (m_BindHost.empty() ? std::string("0.0.0.0") : m_BindHost) +
+               ":" + std::to_string(m_Port));
     return true;
 }
 

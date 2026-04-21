@@ -18,37 +18,29 @@ Standalone A2S (Source Server Query) provider for Windrose game servers. Injects
    YourServer/R5/Binaries/Win64/version.dll
    ```
 
-2. Start your server. The query listener initializes automatically after ~2s (same as the RCON variant).
-
-3. A configuration file is generated at:
+2. Start your server with the usual `-QueryPort` (and optionally `-MultiHome`) switch. Example:
    ```
-   YourServer/R5/Binaries/Win64/windrosequery/settings.ini
+   WindroseServer.exe -QueryPort=27015 -MultiHome=123.45.67.89
    ```
 
-4. Make sure the UDP port (default `27015`) is open in your firewall.
+3. The query listener starts automatically ~2 seconds into startup and binds to the port you passed on the CLI.
+
+4. Open that UDP port in your firewall.
 
 ## Configuration
 
-Edit `windrosequery/settings.ini`:
+There is no config file. The only knobs are the Unreal command-line switches the server is already started with:
 
-```ini
-[Query]
-Port=27015
-ServerName=Windrose Server
-Map=Windrose
-GameFolder=windrose
-GameDescription=Windrose
-AppId=0
-MaxPlayers=64
-BotCount=0
-VACSecured=false
-Private=false
-Version=1.0.0
-EnableLogging=true
-LogFile=windrosequery\query.log
-```
+| Switch | Purpose | Default when absent |
+|---|---|---|
+| `-QueryPort=<port>` | UDP port the A2S listener binds to | `27015` |
+| `-MultiHome=<ip>`   | Local IPv4 to bind on | `0.0.0.0` (all interfaces) |
 
-Values read from the server's `ServerDescription.json` (`ServerName`, `MaxPlayerCount`, `DeploymentId`, etc.) override the configured defaults when available.
+Both `-Key=Value` and the Unreal URL-form `?Key=Value` (e.g. `MapName?listen?QueryPort=27016`) are accepted.
+
+All server metadata reported over A2S (`name`, `max_players`, `version`, `invite_code`, `deployment_id`) is read live from the server's `ServerDescription.json`. Built-in fallbacks in `config.h` are used only if that file is missing.
+
+A log is always written to `YourServer/R5/Binaries/Win64/windrosequery/query.log`.
 
 ## Testing
 

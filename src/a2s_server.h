@@ -41,6 +41,7 @@ private:
     SOCKET udpSocket;
     bool running;
     int m_Port;
+    std::string m_BindHost;
     std::thread* listenerThread;
 
     std::mutex challengeMutex;
@@ -62,7 +63,12 @@ private:
 public:
     A2SServer();
     ~A2SServer();
-    bool Start(int port = 27015);
+
+    // Starts the UDP listener.
+    //   port     - UDP port to bind (typically from -QueryPort)
+    //   bindHost - IPv4 string to bind to, or empty for INADDR_ANY
+    //              (typically from -MultiHome)
+    bool Start(int port = 27015, const std::string& bindHost = "");
     void Stop();
     bool IsRunning() const { return running; }
 };

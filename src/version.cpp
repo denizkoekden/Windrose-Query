@@ -1,5 +1,6 @@
 #include <winsock2.h>
 #include <windows.h>
+#include <shellapi.h>
 #include <fstream>
 #include <string>
 #include <ctime>
@@ -9,14 +10,33 @@
 #include "windrose_engine.h"
 #include "config.h"
 
+#pragma comment(lib, "Shell32.lib")
+
 HMODULE hOriginalDll = nullptr;
 A2SServer* g_QueryServer = nullptr;
 QueryConfig g_Config;
 std::thread* g_InitThread = nullptr;
 
+static std::string GetLogPath() {
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::string dir(exePath);
+    size_t slash = dir.find_last_of("\\/");
+    if (slash != std::string::npos) dir = dir.substr(0, slash);
+    return dir + "\\" + g_Config.logFile;
+}
+
+static void EnsureLogDirectory() {
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::string dir(exePath);
+    size_t slash = dir.find_last_of("\\/");
+    if (slash != std::string::npos) dir = dir.substr(0, slash);
+    CreateDirectoryA((dir + "\\windrosequery").c_str(), NULL);
+}
+
 void LogMessage(const std::string& message) {
-    if (!g_Config.enableLogging) return;
-    std::ofstream logFile(g_Config.logFile, std::ios::app);
+    std::ofstream logFile(GetLogPath(), std::ios::app);
     if (logFile.is_open()) {
         auto now = std::chrono::system_clock::now();
         auto time = std::chrono::system_clock::to_time_t(now);
@@ -28,27 +48,94 @@ void LogMessage(const std::string& message) {
     }
 }
 
+// Extracts the value for a -Key=Value style Unreal switch from the process
+// command line. Case-insensitive match on the key. Returns empty string if
+// the switch is not present.
+//
+// Also recognizes the ?Key=Value URL-form that Unreal accepts on map URLs,
+// e.g. MapName?listen?QueryPort=27016.
+static std::string GetCmdLineSwitch(const std::wstring& key) {
+    LPWSTR cmdLine = GetCommandLineW();
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(cmdLine, &argc);
+    if (!argv) return "";
+
+    std::wstring dashPrefix = L"-" + key + L"=";
+    std::wstring qPrefix    = L"?" + key + L"=";
+
+    std::wstring valueW;
+
+    auto tryMatch = [&](const std::wstring& token, const std::wstring& prefix) -> bool {
+        if (token.size() <= prefix.size()) return false;
+        if (_wcsnicmp(token.c_str(), prefix.c_str(), prefix.size()) != 0) return false;
+        valueW = token.substr(prefix.size());
+        return true;
+    };
+
+    for (int i = 0; i < argc && valueW.empty(); ++i) {
+        std::wstring token = argv[i];
+
+        if (tryMatch(token, dashPrefix)) break;
+
+        // URL-form embedded in an argument like "MapName?listen?QueryPort=27016"
+        size_t pos = 0;
+        while ((pos = token.find(L'?', pos)) != std::wstring::npos) {
+            std::wstring sub = token.substr(pos);
+            // sub starts with '?'; compare against "?Key="
+            if (sub.size() > qPrefix.size() &&
+                _wcsnicmp(sub.c_str(), qPrefix.c_str(), qPrefix.size()) == 0) {
+                std::wstring rest = sub.substr(qPrefix.size());
+                size_t end = rest.find(L'?');
+                valueW = (end == std::wstring::npos) ? rest : rest.substr(0, end);
+                break;
+            }
+            pos++;
+        }
+    }
+
+    LocalFree(argv);
+
+    if (valueW.empty()) return "";
+
+    int needed = WideCharToMultiByte(CP_UTF8, 0, valueW.c_str(), (int)valueW.size(),
+                                     nullptr, 0, nullptr, nullptr);
+    std::string out(needed, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, valueW.c_str(), (int)valueW.size(),
+                        out.data(), needed, nullptr, nullptr);
+    return out;
+}
+
+static void ApplyCmdLineOverrides() {
+    std::string queryPort = GetCmdLineSwitch(L"QueryPort");
+    if (!queryPort.empty()) {
+        try {
+            int p = std::stoi(queryPort);
+            if (p > 0 && p <= 65535) {
+                g_Config.port = p;
+                LogMessage("CLI: -QueryPort=" + queryPort);
+            } else {
+                LogMessage("CLI: -QueryPort out of range, ignoring: " + queryPort);
+            }
+        } catch (...) {
+            LogMessage("CLI: -QueryPort not a number, ignoring: " + queryPort);
+        }
+    }
+
+    std::string multiHome = GetCmdLineSwitch(L"MultiHome");
+    if (!multiHome.empty()) {
+        g_Config.multiHome = multiHome;
+        LogMessage("CLI: -MultiHome=" + multiHome);
+    }
+}
+
 void AsyncInitialize() {
-    // Wait for game to finish loading, then initialize the query server.
-    // Matches the delay pattern used for UE4SS-hosted servers.
+    // Wait for the host to finish early startup before we attach.
     Sleep(2000);
 
+    EnsureLogDirectory();
     LogMessage("Initializing A2S Query...");
 
-    QueryConfig::EnsureConfigDirectory();
-    std::string configPath = QueryConfig::GetConfigPath();
-
-    std::ifstream testFile(configPath);
-    bool configExists = testFile.good();
-    testFile.close();
-
-    if (!configExists) {
-        g_Config.Save(configPath);
-        LogMessage("Created default config: " + configPath);
-    } else {
-        g_Config.Load(configPath);
-        LogMessage("Loaded config from: " + configPath);
-    }
+    ApplyCmdLineOverrides();
 
     UnrealEngine::g_Engine = new UnrealEngine::StandaloneIntegration();
     if (UnrealEngine::g_Engine->Initialize()) {
@@ -58,19 +145,15 @@ void AsyncInitialize() {
     }
 
     g_QueryServer = new A2SServer();
-    if (g_QueryServer->Start(g_Config.port)) {
-        char msg[256];
-        sprintf_s(msg, "A2S query server started on UDP port %d", g_Config.port);
-        LogMessage(msg);
+    if (g_QueryServer->Start(g_Config.port, g_Config.multiHome)) {
+        LogMessage("A2S query server online");
     } else {
-        char msg[256];
-        sprintf_s(msg, "ERROR: Failed to start A2S query server - check if UDP port %d is already in use", g_Config.port);
-        LogMessage(msg);
+        LogMessage("ERROR: Failed to start A2S query server on port " +
+                   std::to_string(g_Config.port));
     }
 }
 
 void InitializeInjection() {
-    LogMessage("DLL Injection initialized - Starting background thread");
     g_InitThread = new std::thread(AsyncInitialize);
     g_InitThread->detach();
 }
@@ -117,13 +200,11 @@ void CleanupInjection() {
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID /*lpReserved*/) {
     switch (ul_reason_for_call) {
     case DLL_PROCESS_ATTACH:
-        LogMessage("DLL_PROCESS_ATTACH called");
         DisableThreadLibraryCalls(hModule);
         InitializeInjection();
         break;
 
     case DLL_PROCESS_DETACH:
-        LogMessage("DLL_PROCESS_DETACH called");
         CleanupInjection();
         break;
     }
