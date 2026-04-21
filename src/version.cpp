@@ -17,22 +17,28 @@ A2SServer* g_QueryServer = nullptr;
 QueryConfig g_Config;
 std::thread* g_InitThread = nullptr;
 
-static std::string GetLogPath() {
+static std::string GetExeDirectory() {
     char exePath[MAX_PATH];
     GetModuleFileNameA(NULL, exePath, MAX_PATH);
     std::string dir(exePath);
     size_t slash = dir.find_last_of("\\/");
     if (slash != std::string::npos) dir = dir.substr(0, slash);
-    return dir + "\\" + g_Config.logFile;
+    return dir;
+}
+
+static std::string GetR5Directory() {
+    return GetExeDirectory() + "\\..\\..";
+}
+
+static std::string GetLogPath() {
+    return GetR5Directory() + "\\" + g_Config.logFile;
 }
 
 static void EnsureLogDirectory() {
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    std::string dir(exePath);
-    size_t slash = dir.find_last_of("\\/");
-    if (slash != std::string::npos) dir = dir.substr(0, slash);
-    CreateDirectoryA((dir + "\\windrosequery").c_str(), NULL);
+    std::string r5Dir = GetR5Directory();
+    CreateDirectoryA((r5Dir + "\\Saved").c_str(), NULL);
+    CreateDirectoryA((r5Dir + "\\Saved\\Logs").c_str(), NULL);
+    CreateDirectoryA((r5Dir + "\\Saved\\Logs\\windrosequery").c_str(), NULL);
 }
 
 void LogMessage(const std::string& message) {

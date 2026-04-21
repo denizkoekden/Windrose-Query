@@ -29,8 +29,8 @@ struct QueryConfig {
     bool privateServer = false;
     std::string version = "1.0.0";
 
-    // Log path is always <exe_dir>\windrosequery\query.log
-    std::string logFile = "windrosequery\\query.log";
+    // Log path is always <R5>\Saved\Logs\windrosequery\query.log
+    std::string logFile = "Saved\\Logs\\windrosequery\\query.log";
 };
 
 extern QueryConfig g_Config;

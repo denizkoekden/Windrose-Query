@@ -11,7 +11,7 @@ Standalone A2S (Source Server Query) provider for Windrose game servers. Injects
 - **A2S_RULES** - Exposes server metadata (invite code, deployment id, address)
 - **S2C_CHALLENGE** - Full support for the challenge token flow required by modern Valve queries
 - **Configuration** - Settings stored in `windrosequery/settings.ini`
-- **Logging** - All activity logged to `windrosequery/query.log`
+- **Logging** - All activity logged to `R5/Saved/Logs/windrosequery/query.log`
 
 ## Installation
 
@@ -42,7 +42,7 @@ Both `-Key=Value` and the Unreal URL-form `?Key=Value` (e.g. `MapName?listen?Que
 
 All server metadata reported over A2S (`name`, `max_players`, `version`, `invite_code`, `deployment_id`) is read live from the server's `ServerDescription.json`. Built-in fallbacks in `config.h` are used only if that file is missing.
 
-A log is always written to `YourServer/R5/Binaries/Win64/windrosequery/query.log`.
+A log is always written to `YourServer/R5/Saved/Logs/windrosequery/query.log`.
 
 ## Testing
 
