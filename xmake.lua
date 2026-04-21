@@ -1,5 +1,6 @@
 set_project("windrose-query")
 set_version("1.0.0")
+set_languages("c++17")
 
 add_rules("mode.release")
 
