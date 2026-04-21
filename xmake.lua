@@ -3,6 +3,7 @@ set_version("1.0.0")
 set_languages("c++17")
 
 add_rules("mode.release")
+set_languages("c++17")
 
 target("version")
     set_kind("shared")
