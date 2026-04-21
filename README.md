@@ -1,5 +1,7 @@
 # Windrose Query
 
+[![build](https://github.com/denizkoekden/windrose-query/actions/workflows/build.yml/badge.svg)](https://github.com/denizkoekden/windrose-query/actions/workflows/build.yml)
+
 Standalone A2S (Source Server Query) provider for Windrose game servers. Injects via `version.dll` proxy and exposes the Valve Source query protocol on UDP so tools such as the Steam server browser, Gametracker, BattleMetrics, `a2s`, `python-valve`, `rust-a2s`, etc. can read server info, players and rules.
 
 ## Features
@@ -81,6 +83,10 @@ xmake
 ```
 
 Output: `dist/version.dll`
+
+### Prebuilt binaries
+
+Every push to this repository runs the `build` workflow and attaches the resulting `version.dll` as a GitHub Actions artifact. Pushing a tag matching `v*` (e.g. `v1.0.0`) additionally creates a GitHub Release with the DLL attached.
 
 ## Technical Details
 
