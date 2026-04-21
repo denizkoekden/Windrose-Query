@@ -1,0 +1,29 @@
+# Build outputs
+*.dll
+*.obj
+*.pdb
+*.lib
+*.exp
+*.ilk
+dist/
+
+# xmake
+.xmake/
+build/
+
+# IDE
+.vs/
+.vscode/
+*.suo
+*.user
+
+# Logs
+*.log
+windrosequery/
+
+# SDK (too large for git)
+5.6.1-0+UE5-R5/
+
+# Test outputs
+__pycache__/
+*.pyc
