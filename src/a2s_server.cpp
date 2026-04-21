@@ -305,14 +305,15 @@ void A2SServer::SendPong(const sockaddr_in& to) {
 }
 
 void A2SServer::SendInfo(const sockaddr_in& to) {
-    // Pull live data from engine + ServerDescription.json
-    size_t playerCount = 0;
-    ServerMetadata meta;
-
-    if (UnrealEngine::g_Engine && UnrealEngine::g_Engine->IsInitialized()) {
-        playerCount = UnrealEngine::g_Engine->GetAllPlayers().size();
-        meta = UnrealEngine::g_Engine->GetServerMetadata();
+    // Always respond from the cached snapshot - never block the query thread
+    // on a live GObjects scan. The snapshot refresher keeps this ~1-2s fresh.
+    UnrealEngine::PlayerSnapshot snap;
+    if (UnrealEngine::g_Snapshot) {
+        snap = UnrealEngine::g_Snapshot->Get();
     }
+
+    size_t playerCount = snap.players.size();
+    const ServerMetadata& meta = snap.meta;
 
     std::string name = !meta.serverName.empty() ? meta.serverName : g_Config.serverName;
     std::string map = g_Config.map;
@@ -353,10 +354,11 @@ void A2SServer::SendInfo(const sockaddr_in& to) {
 }
 
 void A2SServer::SendPlayer(const sockaddr_in& to) {
-    std::vector<PlayerInfo> players;
-    if (UnrealEngine::g_Engine && UnrealEngine::g_Engine->IsInitialized()) {
-        players = UnrealEngine::g_Engine->GetAllPlayers();
+    UnrealEngine::PlayerSnapshot snap;
+    if (UnrealEngine::g_Snapshot) {
+        snap = UnrealEngine::g_Snapshot->Get();
     }
+    std::vector<PlayerInfo>& players = snap.players;
 
     if (players.size() > 255) players.resize(255);
 
@@ -378,10 +380,11 @@ void A2SServer::SendPlayer(const sockaddr_in& to) {
 }
 
 void A2SServer::SendRules(const sockaddr_in& to) {
-    ServerMetadata meta;
-    if (UnrealEngine::g_Engine && UnrealEngine::g_Engine->IsInitialized()) {
-        meta = UnrealEngine::g_Engine->GetServerMetadata();
+    UnrealEngine::PlayerSnapshot snap;
+    if (UnrealEngine::g_Snapshot) {
+        snap = UnrealEngine::g_Snapshot->Get();
     }
+    const ServerMetadata& meta = snap.meta;
 
     std::vector<std::pair<std::string, std::string>> rules;
     rules.emplace_back("game", g_Config.gameDescription);

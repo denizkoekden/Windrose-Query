@@ -12,6 +12,7 @@ extern void LogMessage(const std::string& message);
 
 namespace UnrealEngine {
     StandaloneIntegration* g_Engine = nullptr;
+    EngineSnapshot* g_Snapshot = nullptr;
 
     StandaloneIntegration::StandaloneIntegration()
         : moduleBase(0), moduleSize(0), GObjectsPtr(0), GNamesPtr(0) {
@@ -190,5 +191,58 @@ namespace UnrealEngine {
         meta.serverAddress = ReadServerInfoField("DirectConnectionServerAddress");
         meta.serverPort = ReadServerInfoField("DirectConnectionServerPort");
         return meta;
+    }
+
+    // --- EngineSnapshot -----------------------------------------------------
+
+    EngineSnapshot::EngineSnapshot(StandaloneIntegration* engine, int refreshIntervalMs)
+        : m_engine(engine), m_intervalMs(refreshIntervalMs) {}
+
+    EngineSnapshot::~EngineSnapshot() {
+        Stop();
+    }
+
+    void EngineSnapshot::RefreshOnce() {
+        if (!m_engine || !m_engine->IsInitialized()) return;
+
+        PlayerSnapshot fresh;
+        fresh.players = m_engine->GetAllPlayers();
+        fresh.meta = m_engine->GetServerMetadata();
+        fresh.refreshedAt = std::chrono::steady_clock::now();
+        fresh.populated = true;
+
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_snapshot = std::move(fresh);
+    }
+
+    void EngineSnapshot::RefreshLoop() {
+        while (m_running.load(std::memory_order_acquire)) {
+            auto nextTick = std::chrono::steady_clock::now() +
+                            std::chrono::milliseconds(m_intervalMs);
+            RefreshOnce();
+
+            // Sleep in short slices so Stop() can break out quickly.
+            while (m_running.load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < nextTick) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+    }
+
+    void EngineSnapshot::Start() {
+        if (m_running.exchange(true)) return;
+        // Prime the snapshot synchronously so the first query has real data.
+        RefreshOnce();
+        m_thread = std::thread(&EngineSnapshot::RefreshLoop, this);
+    }
+
+    void EngineSnapshot::Stop() {
+        if (!m_running.exchange(false)) return;
+        if (m_thread.joinable()) m_thread.join();
+    }
+
+    PlayerSnapshot EngineSnapshot::Get() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_snapshot;
     }
 }

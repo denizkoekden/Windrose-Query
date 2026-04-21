@@ -144,6 +144,12 @@ void AsyncInitialize() {
         LogMessage("Failed to initialize engine integration");
     }
 
+    // Start the snapshot refresher before the query server so the first A2S
+    // query already sees a populated snapshot.
+    UnrealEngine::g_Snapshot = new UnrealEngine::EngineSnapshot(UnrealEngine::g_Engine, 1500);
+    UnrealEngine::g_Snapshot->Start();
+    LogMessage("Snapshot refresher started (interval 1500 ms)");
+
     g_QueryServer = new A2SServer();
     if (g_QueryServer->Start(g_Config.port, g_Config.multiHome)) {
         LogMessage("A2S query server online");
@@ -163,6 +169,12 @@ void CleanupInjection() {
         g_QueryServer->Stop();
         delete g_QueryServer;
         g_QueryServer = nullptr;
+    }
+
+    if (UnrealEngine::g_Snapshot) {
+        UnrealEngine::g_Snapshot->Stop();
+        delete UnrealEngine::g_Snapshot;
+        UnrealEngine::g_Snapshot = nullptr;
     }
 
     if (UnrealEngine::g_Engine) {

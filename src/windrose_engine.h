@@ -3,6 +3,10 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <atomic>
+#include <mutex>
+#include <thread>
+#include <chrono>
 
 // FString with Small String Optimization (SSO)
 // Reference: SDK/UnrealContainers.hpp
@@ -92,4 +96,44 @@ namespace UnrealEngine {
     };
 
     extern StandaloneIntegration* g_Engine;
+
+    // Immutable point-in-time view of the live game state. A2S handlers read
+    // from this, never from the engine directly, so responses never block on
+    // a full GObjects scan and every query gets an immediate answer.
+    struct PlayerSnapshot {
+        std::vector<PlayerInfo> players;
+        ServerMetadata meta;
+        std::chrono::steady_clock::time_point refreshedAt{};
+        bool populated = false;
+    };
+
+    // Background refresher. Runs a worker thread that calls GetAllPlayers()
+    // and GetServerMetadata() on a fixed interval, swaps the result under a
+    // mutex, and lets Get() return a cheap copy to the query handlers.
+    class EngineSnapshot {
+    public:
+        EngineSnapshot(StandaloneIntegration* engine, int refreshIntervalMs = 1500);
+        ~EngineSnapshot();
+
+        // Performs one synchronous refresh then starts the worker thread.
+        void Start();
+        void Stop();
+
+        PlayerSnapshot Get();
+
+    private:
+        void RefreshOnce();
+        void RefreshLoop();
+
+        StandaloneIntegration* m_engine;
+        int m_intervalMs;
+
+        std::atomic<bool> m_running{false};
+        std::thread m_thread;
+
+        std::mutex m_mutex;
+        PlayerSnapshot m_snapshot;
+    };
+
+    extern EngineSnapshot* g_Snapshot;
 }
