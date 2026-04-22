@@ -80,4 +80,7 @@ jobs:
           files: out/*.dll
           generate_release_notes: true
           draft: false
-          prerelease: false
+          # Treat v0.x tags and any tag containing a pre-release suffix (e.g.
+          # v1.0.0-beta, v2.0-rc1) as GitHub pre-releases. Stable 1.x+ tags
+          # without a suffix go out as full releases.
+          prerelease: ${{ startsWith(github.ref_name, 'v0.') || contains(github.ref_name, '-') }}
