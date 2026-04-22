@@ -11,6 +11,7 @@
 #include <cstdint>
 
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "advapi32.lib")
 
 // Source A2S query headers
 // Reference: https://developer.valvesoftware.com/wiki/Server_queries

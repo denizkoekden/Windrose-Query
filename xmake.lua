@@ -13,5 +13,5 @@ target("version")
     set_targetdir("dist")
 
     if is_plat("windows") then
-        add_syslinks("kernel32", "user32", "ws2_32")
+        add_syslinks("kernel32", "user32", "ws2_32", "advapi32")
     end
