@@ -5,6 +5,7 @@
 #include <random>
 #include <chrono>
 #include <cstring>
+#include <cctype>
 
 extern QueryConfig g_Config;
 extern void LogMessage(const std::string& message);
@@ -102,6 +103,65 @@ namespace {
         // IP (32) + port (16) packed
         return ((uint64_t)from.sin_addr.s_addr << 16) | (uint64_t)from.sin_port;
     }
+
+    std::string TrimAscii(const std::string& value) {
+        size_t begin = 0;
+        size_t end = value.size();
+
+        while (begin < end && std::isspace((unsigned char)value[begin])) begin++;
+        while (end > begin && std::isspace((unsigned char)value[end - 1])) end--;
+
+        return value.substr(begin, end - begin);
+    }
+
+    bool ParseIPv4Address(const std::string& input, in_addr& out, std::string& normalized) {
+        std::string host = TrimAscii(input);
+        if (host.size() >= 2 &&
+            ((host.front() == '"' && host.back() == '"') ||
+             (host.front() == '\'' && host.back() == '\''))) {
+            host = TrimAscii(host.substr(1, host.size() - 2));
+        }
+
+        if (host.empty()) return false;
+
+        uint32_t octets[4] = {};
+        size_t pos = 0;
+
+        for (int i = 0; i < 4; ++i) {
+            if (pos >= host.size() || !std::isdigit((unsigned char)host[pos])) {
+                return false;
+            }
+
+            uint32_t value = 0;
+            while (pos < host.size() && std::isdigit((unsigned char)host[pos])) {
+                value = (value * 10) + (uint32_t)(host[pos] - '0');
+                if (value > 255) return false;
+                pos++;
+            }
+
+            octets[i] = value;
+
+            if (i < 3) {
+                if (pos >= host.size() || host[pos] != '.') return false;
+                pos++;
+            } else if (pos != host.size()) {
+                return false;
+            }
+        }
+
+        uint32_t hostOrder =
+            (octets[0] << 24) |
+            (octets[1] << 16) |
+            (octets[2] << 8) |
+            octets[3];
+
+        out.s_addr = htonl(hostOrder);
+        normalized = std::to_string(octets[0]) + "." +
+                     std::to_string(octets[1]) + "." +
+                     std::to_string(octets[2]) + "." +
+                     std::to_string(octets[3]);
+        return true;
+    }
 }
 
 A2SServer::A2SServer() : udpSocket(INVALID_SOCKET), running(false), m_Port(27015), listenerThread(nullptr) {
@@ -116,7 +176,7 @@ A2SServer::~A2SServer() {
 
 bool A2SServer::Start(int port, const std::string& bindHost) {
     m_Port = port;
-    m_BindHost = bindHost;
+    m_BindHost.clear();
     if (running) return false;
 
     udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -129,15 +189,25 @@ bool A2SServer::Start(int port, const std::string& bindHost) {
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_port = htons((u_short)m_Port);
 
-    if (m_BindHost.empty()) {
+    std::string trimmedBindHost = TrimAscii(bindHost);
+    if (trimmedBindHost.empty()) {
         serverAddr.sin_addr.s_addr = INADDR_ANY;
     } else {
-        if (InetPtonA(AF_INET, m_BindHost.c_str(), &serverAddr.sin_addr) != 1) {
-            LogMessage("A2S: Invalid -MultiHome address '" + m_BindHost +
-                       "', falling back to INADDR_ANY");
-            serverAddr.sin_addr.s_addr = INADDR_ANY;
-            m_BindHost.clear();
+        in_addr parsedAddr{};
+        std::string normalizedAddr;
+
+        // Wine can report valid dotted IPv4 input as rejected through InetPtonA,
+        // so parse the simple -MultiHome IPv4 form locally.
+        if (!ParseIPv4Address(trimmedBindHost, parsedAddr, normalizedAddr)) {
+            LogMessage("A2S: Invalid -MultiHome address '" + bindHost +
+                       "', refusing to fall back to 0.0.0.0");
+            closesocket(udpSocket);
+            udpSocket = INVALID_SOCKET;
+            return false;
         }
+
+        serverAddr.sin_addr = parsedAddr;
+        m_BindHost = normalizedAddr;
     }
 
     if (bind(udpSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
