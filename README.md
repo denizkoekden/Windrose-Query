@@ -40,6 +40,7 @@ There is no config file. The only knobs are the Unreal command-line switches the
 
 Both `-Key=Value` and the Unreal URL-form `?Key=Value` (e.g. `MapName?listen?QueryPort=27016`) are accepted.
 When `-MultiHome` is present it must be a dotted IPv4 address. Invalid values fail the query listener startup instead of falling back to `0.0.0.0`.
+Under Wine with `-MultiHome`, the A2S listener uses a raw IPv4 socket instead of a Winsock UDP bind. Packets are filtered by the exact `(MultiHome IP, QueryPort)` pair, so several instances can share a host without colliding as long as that pair is unique. This Wine path requires root or `CAP_NET_RAW`.
 
 All server metadata reported over A2S (`name`, `max_players`, `version`, `invite_code`, `deployment_id`) is read live from the server's `ServerDescription.json`. Built-in fallbacks in `config.h` are used only if that file is missing.
 

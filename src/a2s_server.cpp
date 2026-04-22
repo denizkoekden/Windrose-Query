@@ -104,6 +104,56 @@ namespace {
         return ((uint64_t)from.sin_addr.s_addr << 16) | (uint64_t)from.sin_port;
     }
 
+    bool IsRunningUnderWine() {
+        HKEY key = nullptr;
+        LONG regResult = RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Wine", 0,
+                                       KEY_QUERY_VALUE, &key);
+        if (regResult == ERROR_SUCCESS) {
+            RegCloseKey(key);
+            return true;
+        }
+
+        key = nullptr;
+        regResult = RegOpenKeyExA(HKEY_LOCAL_MACHINE, "Software\\Wine", 0,
+                                  KEY_QUERY_VALUE, &key);
+        if (regResult == ERROR_SUCCESS) {
+            RegCloseKey(key);
+            return true;
+        }
+
+        HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+        return ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
+    }
+
+    void WriteU16BE(std::vector<uint8_t>& buf, size_t offset, uint16_t value) {
+        buf[offset] = (uint8_t)((value >> 8) & 0xFF);
+        buf[offset + 1] = (uint8_t)(value & 0xFF);
+    }
+
+    uint16_t ReadU16BE(const uint8_t* data) {
+        return (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
+    }
+
+    uint16_t InternetChecksum(const uint8_t* data, size_t size) {
+        uint32_t sum = 0;
+        size_t pos = 0;
+
+        while (pos + 1 < size) {
+            sum += ((uint32_t)data[pos] << 8) | data[pos + 1];
+            pos += 2;
+        }
+
+        if (pos < size) {
+            sum += (uint32_t)data[pos] << 8;
+        }
+
+        while (sum >> 16) {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+
+        return (uint16_t)(~sum & 0xFFFF);
+    }
+
     std::string TrimAscii(const std::string& value) {
         size_t begin = 0;
         size_t end = value.size();
@@ -164,7 +214,19 @@ namespace {
     }
 }
 
-A2SServer::A2SServer() : udpSocket(INVALID_SOCKET), running(false), m_Port(27015), listenerThread(nullptr) {
+A2SServer::A2SServer()
+    : udpSocket(INVALID_SOCKET),
+      rawSocket(INVALID_SOCKET),
+      running(false),
+      m_Port(27015),
+      m_BindAddr{},
+      m_HasBindAddr(false),
+      m_IsWine(IsRunningUnderWine()),
+      m_UseRawListener(false),
+      m_RawSocketAttempted(false),
+      m_RawSendActiveLogged(false),
+      m_RawSendErrorLogged(false),
+      listenerThread(nullptr) {
     WSADATA wsaData;
     WSAStartup(MAKEWORD(2, 2), &wsaData);
 }
@@ -175,15 +237,16 @@ A2SServer::~A2SServer() {
 }
 
 bool A2SServer::Start(int port, const std::string& bindHost) {
-    m_Port = port;
-    m_BindHost.clear();
     if (running) return false;
 
-    udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (udpSocket == INVALID_SOCKET) {
-        LogMessage("A2S: Failed to create UDP socket");
-        return false;
-    }
+    m_Port = port;
+    m_BindHost.clear();
+    m_BindAddr.s_addr = INADDR_ANY;
+    m_HasBindAddr = false;
+    m_UseRawListener = false;
+    m_RawSocketAttempted = false;
+    m_RawSendActiveLogged = false;
+    m_RawSendErrorLogged = false;
 
     sockaddr_in serverAddr{};
     serverAddr.sin_family = AF_INET;
@@ -208,6 +271,31 @@ bool A2SServer::Start(int port, const std::string& bindHost) {
 
         serverAddr.sin_addr = parsedAddr;
         m_BindHost = normalizedAddr;
+        m_BindAddr = parsedAddr;
+        m_HasBindAddr = true;
+    }
+
+    if (m_IsWine && m_HasBindAddr) {
+        if (!OpenRawSocket()) {
+            LogMessage("A2S: Failed to start raw IPv4 listener for Wine -MultiHome " +
+                       m_BindHost + ":" + std::to_string(m_Port));
+            return false;
+        }
+
+        m_UseRawListener = true;
+        running = true;
+        listenerThread = new std::thread(&A2SServer::ListenerLoop, this);
+
+        LogMessage("A2S: Wine raw IPv4 query listener active on " +
+                   m_BindHost + ":" + std::to_string(m_Port) +
+                   " (no Winsock UDP bind)");
+        return true;
+    }
+
+    udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (udpSocket == INVALID_SOCKET) {
+        LogMessage("A2S: Failed to create UDP socket");
+        return false;
     }
 
     if (bind(udpSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
@@ -230,13 +318,110 @@ bool A2SServer::Start(int port, const std::string& bindHost) {
     return true;
 }
 
+bool A2SServer::OpenRawSocket() {
+    if (rawSocket != INVALID_SOCKET) return true;
+    if (m_RawSocketAttempted) return false;
+
+    m_RawSocketAttempted = true;
+    rawSocket = socket(AF_INET, SOCK_RAW, IPPROTO_UDP);
+    if (rawSocket == INVALID_SOCKET) {
+        LogMessage("A2S: Raw IPv4 socket unavailable; Wine -MultiHome cannot avoid UDP wildcard bind " +
+                   std::string("(WSA error ") + std::to_string(WSAGetLastError()) + ")");
+        return false;
+    }
+
+    int hdrIncl = 1;
+    if (setsockopt(rawSocket, IPPROTO_IP, IP_HDRINCL,
+                   (const char*)&hdrIncl, sizeof(hdrIncl)) == SOCKET_ERROR) {
+        LogMessage("A2S: IP_HDRINCL failed on raw IPv4 socket " +
+                   std::string("(WSA error ") + std::to_string(WSAGetLastError()) + ")");
+        closesocket(rawSocket);
+        rawSocket = INVALID_SOCKET;
+        return false;
+    }
+
+    return true;
+}
+
+bool A2SServer::SendRawPacket(const sockaddr_in& to, const std::vector<uint8_t>& payload) {
+    if (!m_UseRawListener || !m_HasBindAddr) return false;
+    if (payload.size() + 28 > 0xFFFF) return false;
+    if (!OpenRawSocket()) return false;
+
+    static uint16_t packetId = 1;
+
+    const size_t ipHeaderSize = 20;
+    const size_t udpHeaderSize = 8;
+    const size_t packetSize = ipHeaderSize + udpHeaderSize + payload.size();
+    std::vector<uint8_t> packet(packetSize, 0);
+
+    packet[0] = 0x45; // IPv4, 20-byte header
+    packet[1] = 0;
+    WriteU16BE(packet, 2, (uint16_t)packetSize);
+    WriteU16BE(packet, 4, packetId++);
+    WriteU16BE(packet, 6, 0);
+    packet[8] = 64;
+    packet[9] = IPPROTO_UDP;
+    std::memcpy(packet.data() + 12, &m_BindAddr.s_addr, 4);
+    std::memcpy(packet.data() + 16, &to.sin_addr.s_addr, 4);
+    WriteU16BE(packet, 10, InternetChecksum(packet.data(), ipHeaderSize));
+
+    size_t udpOffset = ipHeaderSize;
+    WriteU16BE(packet, udpOffset, (uint16_t)m_Port);
+    std::memcpy(packet.data() + udpOffset + 2, &to.sin_port, 2);
+    WriteU16BE(packet, udpOffset + 4, (uint16_t)(udpHeaderSize + payload.size()));
+    WriteU16BE(packet, udpOffset + 6, 0); // UDP checksum is optional for IPv4.
+    std::memcpy(packet.data() + udpOffset + udpHeaderSize, payload.data(), payload.size());
+
+    sockaddr_in dst{};
+    dst.sin_family = AF_INET;
+    dst.sin_addr = to.sin_addr;
+    dst.sin_port = 0;
+
+    int sent = sendto(rawSocket, (const char*)packet.data(), (int)packet.size(), 0,
+                      (const sockaddr*)&dst, sizeof(dst));
+    if (sent == (int)packet.size()) {
+        if (!m_RawSendActiveLogged) {
+            m_RawSendActiveLogged = true;
+            LogMessage("A2S: Raw IPv4 replies active from " +
+                       m_BindHost + ":" + std::to_string(m_Port));
+        }
+        return true;
+    }
+
+    if (!m_RawSendErrorLogged) {
+        m_RawSendErrorLogged = true;
+        LogMessage("A2S: Raw IPv4 reply failed (WSA error " +
+                   std::to_string(WSAGetLastError()) + ")");
+    }
+
+    return false;
+}
+
+void A2SServer::SendPacket(const sockaddr_in& to, const std::vector<uint8_t>& payload) {
+    if (m_UseRawListener) {
+        SendRawPacket(to, payload);
+        return;
+    }
+
+    if (udpSocket != INVALID_SOCKET) {
+        sendto(udpSocket, (const char*)payload.data(), (int)payload.size(), 0,
+               (const sockaddr*)&to, sizeof(to));
+    }
+}
+
 void A2SServer::Stop() {
-    if (!running) return;
+    bool wasRunning = running;
     running = false;
 
     if (udpSocket != INVALID_SOCKET) {
         closesocket(udpSocket);
         udpSocket = INVALID_SOCKET;
+    }
+
+    if (rawSocket != INVALID_SOCKET) {
+        closesocket(rawSocket);
+        rawSocket = INVALID_SOCKET;
     }
 
     if (listenerThread && listenerThread->joinable()) {
@@ -245,29 +430,73 @@ void A2SServer::Stop() {
         listenerThread = nullptr;
     }
 
-    LogMessage("A2S: Query server stopped");
+    if (wasRunning) {
+        LogMessage("A2S: Query server stopped");
+    }
 }
 
 void A2SServer::ListenerLoop() {
-    uint8_t buffer[1400];
+    uint8_t buffer[2048];
     while (running) {
+        SOCKET listenSocket = m_UseRawListener ? rawSocket : udpSocket;
+        if (listenSocket == INVALID_SOCKET) break;
+
         fd_set readSet;
         FD_ZERO(&readSet);
-        FD_SET(udpSocket, &readSet);
+        FD_SET(listenSocket, &readSet);
 
         timeval timeout{1, 0};
         int result = select(0, &readSet, nullptr, nullptr, &timeout);
         if (result <= 0) continue;
-        if (!FD_ISSET(udpSocket, &readSet)) continue;
+        if (!FD_ISSET(listenSocket, &readSet)) continue;
 
         sockaddr_in from{};
         int fromLen = sizeof(from);
-        int n = recvfrom(udpSocket, (char*)buffer, sizeof(buffer), 0,
+        int n = recvfrom(listenSocket, (char*)buffer, sizeof(buffer), 0,
                          (sockaddr*)&from, &fromLen);
         if (n <= 0) continue;
 
-        HandleDatagram(buffer, n, from);
+        if (m_UseRawListener) {
+            HandleRawDatagram(buffer, n);
+        } else {
+            HandleDatagram(buffer, n, from);
+        }
     }
+}
+
+void A2SServer::HandleRawDatagram(const uint8_t* data, int size) {
+    if (!m_HasBindAddr || size < 28) return;
+
+    uint8_t version = data[0] >> 4;
+    uint8_t headerLen = (uint8_t)((data[0] & 0x0F) * 4);
+    if (version != 4 || headerLen < 20) return;
+    if (size < headerLen + 8) return;
+    if (data[9] != IPPROTO_UDP) return;
+
+    uint16_t totalLen = ReadU16BE(data + 2);
+    if (totalLen < headerLen + 8) return;
+    if (totalLen > (uint16_t)size) totalLen = (uint16_t)size;
+
+    uint16_t fragment = ReadU16BE(data + 6);
+    if ((fragment & 0x3FFF) != 0) return;
+
+    uint32_t dstAddr = 0;
+    std::memcpy(&dstAddr, data + 16, sizeof(dstAddr));
+    if (dstAddr != m_BindAddr.s_addr) return;
+
+    const uint8_t* udp = data + headerLen;
+    uint16_t srcPort = ReadU16BE(udp);
+    uint16_t dstPort = ReadU16BE(udp + 2);
+    uint16_t udpLen = ReadU16BE(udp + 4);
+    if (dstPort != (uint16_t)m_Port) return;
+    if (udpLen < 8 || headerLen + udpLen > totalLen) return;
+
+    sockaddr_in from{};
+    from.sin_family = AF_INET;
+    std::memcpy(&from.sin_addr.s_addr, data + 12, sizeof(from.sin_addr.s_addr));
+    from.sin_port = htons(srcPort);
+
+    HandleDatagram(udp + 8, (int)udpLen - 8, from);
 }
 
 int32_t A2SServer::IssueChallenge(const sockaddr_in& from) {
@@ -355,8 +584,7 @@ void A2SServer::SendChallenge(const sockaddr_in& to, uint8_t /*forHeader*/) {
     w.WriteU8(A2S::RESP_CHALLENGE);
     w.WriteI32(token);
 
-    sendto(udpSocket, (const char*)w.data().data(), (int)w.size(), 0,
-           (const sockaddr*)&to, sizeof(to));
+    SendPacket(to, w.data());
 }
 
 void A2SServer::SendPong(const sockaddr_in& to) {
@@ -364,8 +592,7 @@ void A2SServer::SendPong(const sockaddr_in& to) {
     w.WriteSimpleHeader();
     w.WriteU8(A2S::RESP_PONG);
     w.WriteCString("00000000000000");
-    sendto(udpSocket, (const char*)w.data().data(), (int)w.size(), 0,
-           (const sockaddr*)&to, sizeof(to));
+    SendPacket(to, w.data());
 }
 
 void A2SServer::SendInfo(const sockaddr_in& to) {
@@ -416,8 +643,7 @@ void A2SServer::SendInfo(const sockaddr_in& to) {
     w.WriteCString(version);           // Version string
     w.WriteU8(0);                      // EDF: no optional fields
 
-    sendto(udpSocket, (const char*)w.data().data(), (int)w.size(), 0,
-           (const sockaddr*)&to, sizeof(to));
+    SendPacket(to, w.data());
 }
 
 void A2SServer::SendPlayer(const sockaddr_in& to) {
@@ -448,8 +674,7 @@ void A2SServer::SendPlayer(const sockaddr_in& to) {
         w.WriteF32(p.connectedSeconds);
     }
 
-    sendto(udpSocket, (const char*)w.data().data(), (int)w.size(), 0,
-           (const sockaddr*)&to, sizeof(to));
+    SendPacket(to, w.data());
 }
 
 void A2SServer::SendRules(const sockaddr_in& to) {
@@ -479,6 +704,5 @@ void A2SServer::SendRules(const sockaddr_in& to) {
         w.WriteCString(v);
     }
 
-    sendto(udpSocket, (const char*)w.data().data(), (int)w.size(), 0,
-           (const sockaddr*)&to, sizeof(to));
+    SendPacket(to, w.data());
 }

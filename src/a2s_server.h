@@ -40,9 +40,17 @@ namespace A2S {
 class A2SServer {
 private:
     SOCKET udpSocket;
+    SOCKET rawSocket;
     bool running;
     int m_Port;
     std::string m_BindHost;
+    in_addr m_BindAddr;
+    bool m_HasBindAddr;
+    bool m_IsWine;
+    bool m_UseRawListener;
+    bool m_RawSocketAttempted;
+    bool m_RawSendActiveLogged;
+    bool m_RawSendErrorLogged;
     std::thread* listenerThread;
 
     std::mutex challengeMutex;
@@ -50,6 +58,7 @@ private:
     std::unordered_map<uint64_t, int32_t> challenges;
 
     void ListenerLoop();
+    void HandleRawDatagram(const uint8_t* data, int size);
     void HandleDatagram(const uint8_t* data, int size, const sockaddr_in& from);
 
     void SendInfo(const sockaddr_in& to);
@@ -57,6 +66,9 @@ private:
     void SendRules(const sockaddr_in& to);
     void SendChallenge(const sockaddr_in& to, uint8_t forHeader);
     void SendPong(const sockaddr_in& to);
+    void SendPacket(const sockaddr_in& to, const std::vector<uint8_t>& payload);
+    bool SendRawPacket(const sockaddr_in& to, const std::vector<uint8_t>& payload);
+    bool OpenRawSocket();
 
     int32_t IssueChallenge(const sockaddr_in& from);
     bool VerifyChallenge(const sockaddr_in& from, int32_t token);
