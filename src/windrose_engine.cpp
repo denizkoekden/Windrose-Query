@@ -1,5 +1,4 @@
 #include "windrose_engine.h"
-#include "pattern_finder.h"
 #include <Psapi.h>
 #include <sstream>
 #include <algorithm>
@@ -10,10 +9,25 @@ extern void LogMessage(const std::string& message);
 
 #pragma comment(lib, "Psapi.lib")
 
-// Layout offsets verified in Ghidra against a live Windrose server build.
+// TArray<T> layout (matches UE4 TArray<APlayerState*> in PlayerArray).
+struct TArrayLayout {
+    void*   Data;   // 0x00
+    int32_t Num;    // 0x08
+    int32_t Max;    // 0x0C
+};
+
+// Layout offsets verified in Ghidra + WindroseRCON against a live Windrose build.
 //
-// AGameStateBase
+// UWorld / Global
 namespace {
+    // Offset of the GWorld pointer inside the host module (Dumper7 / WindroseRCON).
+    // Dereference once → UWorld*, then read GameState at +0x01B0.
+    constexpr uintptr_t GWorldOffset      = 0x0F530460;
+
+    // UWorld
+    constexpr size_t UW_GameState         = 0x01B0;  // AGameStateBase*
+
+    // AGameStateBase
     constexpr size_t GS_AuthorityGameMode = 0x02B0;  // AGameModeBase*
     constexpr size_t GS_PlayerArray       = 0x02C0;  // TArray<APlayerState*>
 
@@ -45,7 +59,7 @@ namespace UnrealEngine {
     EngineSnapshot* g_Snapshot = nullptr;
 
     StandaloneIntegration::StandaloneIntegration()
-        : moduleBase(0), moduleSize(0), GObjectsPtr(0), GameStatePtr(0) {
+        : moduleBase(0), moduleSize(0), GWorldPtr(0) {
     }
 
     StandaloneIntegration::~StandaloneIntegration() {
@@ -70,42 +84,25 @@ namespace UnrealEngine {
         char hexBuffer[32];
         sprintf_s(hexBuffer, "0x%llX", moduleBase);
         LogMessage(std::string("Standalone: Module base: ") + hexBuffer);
-        LogMessage("Standalone: Module size: " + std::to_string(moduleSize));
 
-        GObjectsPtr = PatternScanner::ScanForGObjects(moduleBase, moduleSize);
-        if (GObjectsPtr) {
-            sprintf_s(hexBuffer, "0x%llX", GObjectsPtr);
-            LogMessage(std::string("GObjects found at: ") + hexBuffer);
-        } else {
-            LogMessage("WARNING: GObjects not found - queries will return empty player lists");
-        }
+        GWorldPtr = moduleBase + GWorldOffset;
+        sprintf_s(hexBuffer, "0x%llX", GWorldPtr);
+        LogMessage(std::string("Standalone: GWorld ptr at ") + hexBuffer);
 
-        // GameState is resolved lazily on the first refresh; at DLL load time
-        // the world has not been constructed yet.
         LogMessage("Standalone: Integration initialized");
         return true;
     }
 
-    bool StandaloneIntegration::IsGameStateValid(uintptr_t gameState) const {
-        if (!gameState) return false;
-        if (IsBadReadPtr((void*)gameState, GS_PlayerArray + sizeof(TArrayLayout))) return false;
+    uintptr_t StandaloneIntegration::ResolveGameState() const {
+        if (!GWorldPtr || IsBadReadPtr((void*)GWorldPtr, sizeof(uintptr_t))) return 0;
 
-        uintptr_t gameMode = *(uintptr_t*)(gameState + GS_AuthorityGameMode);
-        if (!gameMode || IsBadReadPtr((void*)gameMode, 8)) return false;
+        uintptr_t world = *(uintptr_t*)GWorldPtr;
+        if (!world || IsBadReadPtr((void*)world, UW_GameState + sizeof(uintptr_t))) return 0;
 
-        TArrayLayout* arr = (TArrayLayout*)(gameState + GS_PlayerArray);
-        if (arr->Num < 0 || arr->Num > 256)         return false;
-        if (arr->Max < arr->Num || arr->Max > 1024) return false;
-        if (arr->Num > 0 && (!arr->Data || IsBadReadPtr(arr->Data, arr->Num * sizeof(void*)))) return false;
+        uintptr_t gameState = *(uintptr_t*)(world + UW_GameState);
+        if (!gameState || IsBadReadPtr((void*)gameState, GS_PlayerArray + sizeof(TArrayLayout))) return 0;
 
-        return true;
-    }
-
-    uintptr_t StandaloneIntegration::ResolveGameState() {
-        if (GameStatePtr && IsGameStateValid(GameStatePtr)) return GameStatePtr;
-
-        GameStatePtr = PatternScanner::ScanForGameState(GObjectsPtr);
-        return GameStatePtr;
+        return gameState;
     }
 
     std::vector<PlayerInfo> StandaloneIntegration::GetAllPlayers() {

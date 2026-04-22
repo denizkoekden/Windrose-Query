@@ -93,12 +93,12 @@ Every push to this repository runs the `build` workflow and attaches the resulti
 ### How It Works
 
 1. **DLL Proxy Injection** - `version.dll` proxies the system `version.dll`, forwarding all `VerQueryValue*`/`GetFileVersionInfo*` exports while attaching to the host process.
-2. **GObjects Location** - Uses the hardcoded Dumper7 offset inside the host module to reach Unreal's global object array.
-3. **GameState Resolution** - Walks GObjects *once* (then caches) to locate the live `AGameStateBase` instance. A candidate passes the filter only when it is not a CDO, its `AuthorityGameMode` pointer is valid, its `PlayerArray` TArray looks sane, and `GameMode -> GameSession -> MaxPlayers` chains cleanly.
-4. **Player Enumeration** - Reads `APlayerState*` entries directly out of `AGameStateBase::PlayerArray` (no full scan). Ghidra-verified offsets:
+2. **GameState Resolution** - Two pointer dereferences: `moduleBase + 0x0F530460` → `UWorld*`, then `UWorld + 0x01B0` → `AGameStateBase*`. No scanning, no caching — the pointer is always current even across map changes. Cross-referenced from WindroseRCON + Dumper7.
+3. **Player Enumeration** - Reads `APlayerState*` entries directly out of `AGameStateBase::PlayerArray` (no GObjects scan at all). Ghidra-verified offsets:
 
    | Object | Field | Offset | Type |
    |---|---|---|---|
+   | `UWorld`         | `GameState`         | `0x01B0` | `AGameStateBase*` |
    | `AGameStateBase` | `AuthorityGameMode` | `0x02B0` | `AGameModeBase*` |
    | `AGameStateBase` | `PlayerArray`       | `0x02C0` | `TArray<APlayerState*>` |
    | `AGameModeBase`  | `GameSession`       | `0x0300` | `AGameSession*` |
@@ -118,6 +118,8 @@ Every push to this repository runs the `build` workflow and attaches the resulti
    - Request kinds: `0x54` INFO, `0x55` PLAYER, `0x56` RULES, `0x69` PING
    - Response kinds: `0x49` INFO, `0x44` PLAYER, `0x45` RULES, `0x41` CHALLENGE
    - Challenge tokens are issued per source address and validated on PLAYER/RULES/INFO.
+
+   The GWorld pointer offset (`moduleBase + 0x0F530460`) was cross-referenced from [WindroseRCON](https://github.com/dkoz/WindroseRCON) and independently confirmed via Dumper7.
 
 ### SDK References
 

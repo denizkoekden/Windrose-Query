@@ -80,18 +80,16 @@ namespace UnrealEngine {
         uintptr_t moduleBase;
         size_t moduleSize;
 
-        uintptr_t GObjectsPtr;
-        // Cached live AGameStateBase*. Resolved lazily on the first call to
-        // GetAllPlayers() after Initialize(), and re-resolved if it later
-        // fails the same validation the scanner applies.
-        uintptr_t GameStatePtr;
+        // Address of the GWorld pointer inside the host module.
+        // Dereference once to get UWorld*, then read GameState at +0x01B0.
+        // Reference: WindroseRCON / Dumper7 SDK - offset 0x0F530460.
+        uintptr_t GWorldPtr;
 
         // Per-PlayerState first-seen time, used for A2S duration. Entries for
         // PlayerStates that drop out of PlayerArray are pruned on each refresh.
         std::map<uintptr_t, std::chrono::steady_clock::time_point> m_firstSeen;
 
-        bool IsGameStateValid(uintptr_t gameState) const;
-        uintptr_t ResolveGameState();
+        uintptr_t ResolveGameState() const;
 
     public:
         StandaloneIntegration();
