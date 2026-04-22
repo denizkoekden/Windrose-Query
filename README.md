@@ -10,7 +10,7 @@ Standalone A2S (Source Server Query) provider for Windrose game servers. Injects
 - **A2S_PLAYER** - Connected players with name, score and connection duration
 - **A2S_RULES** - Exposes server metadata (invite code, deployment id, address)
 - **S2C_CHALLENGE** - Full support for the challenge token flow required by modern Valve queries
-- **Configuration** - Settings stored in `windrosequery/settings.ini`
+- **Configuration** - No config file; only `-QueryPort` and `-MultiHome` from the Unreal CLI
 - **Logging** - All activity logged to `R5/Saved/Logs/windrosequery/query.log`
 
 ## Installation
@@ -113,8 +113,8 @@ Every push to this repository runs the `build` workflow and attaches the resulti
    | `APlayerState`   | `AccountId`         | `0x0388` | `FString` (R5 extension) |
 
    Zombie PlayerStates (client dropped but not yet GC'd) are filtered out by requiring either `PawnPrivate != null` or `CompressedPing > 0`, and inactive/spectator players are skipped via the `PlayerFlags` bits `0x20` and `0x04`.
-5. **A2S Duration** - `connectedSeconds` is tracked per PlayerState pointer inside the DLL: the first refresh that observes a new `APlayerState*` stamps `steady_clock::now()`, and subsequent A2S_PLAYER responses report the delta. Entries drop out when the PlayerState leaves `PlayerArray`.
-6. **A2S Protocol** - Implements the Valve Source server query protocol:
+4. **A2S Duration** - `connectedSeconds` is tracked per PlayerState pointer inside the DLL: the first refresh that observes a new `APlayerState*` stamps `steady_clock::now()`, and subsequent A2S_PLAYER responses report the delta. Entries drop out when the PlayerState leaves `PlayerArray`.
+5. **A2S Protocol** - Implements the Valve Source server query protocol:
    - Request kinds: `0x54` INFO, `0x55` PLAYER, `0x56` RULES, `0x69` PING
    - Response kinds: `0x49` INFO, `0x44` PLAYER, `0x45` RULES, `0x41` CHALLENGE
    - Challenge tokens are issued per source address and validated on PLAYER/RULES/INFO.
